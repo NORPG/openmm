@@ -1,0 +1,23 @@
+add_library(${STATIC_TARGET} STATIC
+    ${SOURCE_FILES}
+    ${SOURCE_INCLUDE_FILES}
+    ${API_ABS_INCLUDE_FILES})
+
+target_link_libraries(${STATIC_TARGET}
+    PUBLIC
+        ${OPENMM_LIBRARY_NAME}_static
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK})
+target_compile_options(${STATIC_TARGET} PRIVATE
+    "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+target_compile_definitions(${STATIC_TARGET} PRIVATE
+    OPENMM_METAL_BUILDING_STATIC_LIBRARY)
+set_target_properties(${STATIC_TARGET} PROPERTIES
+    LINK_FLAGS "${EXTRA_LINK_FLAGS}"
+    COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
+    MACOSX_DEPLOYMENT_TARGET "13.0")
+
+install(TARGETS ${STATIC_TARGET}
+    RUNTIME DESTINATION lib/plugins
+    LIBRARY DESTINATION lib/plugins
+    ARCHIVE DESTINATION lib/plugins)
