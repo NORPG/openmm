@@ -1,0 +1,7 @@
+.section __DATA_CONST,__omm_mtl,regular,no_dead_strip
+.p2align 4
+.private_extern _openmmMetalMetallibStart
+_openmmMetalMetallibStart:
+.incbin "@OPENMM_METAL_METALLIB_PATH@"
+.private_extern _openmmMetalMetallibEnd
+_openmmMetalMetallibEnd:

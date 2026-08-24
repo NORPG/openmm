@@ -146,15 +146,38 @@ void MetalQueueState::checkForErrors() {
 
 void MetalQueueState::waitUntilIdle() {
     @autoreleasepool {
-        {
+        string markerError;
+        try {
             lock_guard<mutex> lock(submissionMutex);
             id<MTLCommandBuffer> marker = makeCommandBuffer("wait until idle");
             submit(marker, true);
         }
+        catch (const exception& e) {
+            markerError = e.what();
+        }
+        catch (...) {
+            markerError = "Unknown error while submitting the Metal queue marker";
+        }
         // Completion handlers run independently of command-buffer ordering.
-        // Waiting for them makes nonblocking downloads observable here too.
+        // Even if the marker failed, wait for them so nonblocking host work
+        // cannot escape this synchronization boundary.
         waitForAsyncCompletions();
-        checkForErrors();
+        string pendingError;
+        try {
+            checkForErrors();
+        }
+        catch (const exception& e) {
+            pendingError = e.what();
+        }
+        catch (...) {
+            pendingError = "Unknown asynchronous Metal queue error";
+        }
+        if (!markerError.empty() && !pendingError.empty())
+            throw OpenMMException(markerError+"\n"+pendingError);
+        if (!markerError.empty())
+            throw OpenMMException(markerError);
+        if (!pendingError.empty())
+            throw OpenMMException(pendingError);
     }
 }
 

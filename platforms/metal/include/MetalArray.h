@@ -67,7 +67,15 @@ public:
 
     void upload(const void* data, bool blocking = true) override;
     void uploadSubArray(const void* data, int offset, int elements, bool blocking = true) override;
+    /**
+     * Download data to host memory.  When blocking is false, the destination
+     * must remain valid until the queue's waitUntilIdle() has returned.
+     */
     void download(void* data, bool blocking = true) const override;
+    /**
+     * Download a range to host memory.  When blocking is false, the destination
+     * must remain valid until the queue's waitUntilIdle() has returned.
+     */
     void downloadSubArray(void* data, int offset, int elements, bool blocking = true) const;
     void copyTo(ArrayInterface& dest) const override;
     void copySubArrayTo(MetalArray& dest, int sourceOffset, int destOffset, int elements) const;

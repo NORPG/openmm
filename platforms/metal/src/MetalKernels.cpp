@@ -28,7 +28,9 @@
 #include "MetalKernels.h"
 #include "MetalArray.h"
 #include "MetalContext.h"
+#ifndef OPENMM_METAL_USE_EMBEDDED_METALLIB
 #include "MetalKernelSources.h"
+#endif
 #include "MetalPlatform.h"
 #include "MetalProgram.h"
 #include "ReferenceMinimize.h"
@@ -45,6 +47,11 @@
 
 using namespace OpenMM;
 using namespace std;
+
+#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
+extern "C" const unsigned char openmmMetalMetallibStart[];
+extern "C" const unsigned char openmmMetalMetallibEnd[];
+#endif
 
 namespace {
 
@@ -72,6 +79,18 @@ void validateNoVirtualSites(const System& system) {
             throw OpenMMException("The first native Metal backend phase does not support virtual sites");
     }
 }
+
+#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
+unique_ptr<MetalProgram> loadProductionMetalProgram(MetalQueue& queue) {
+    const uintptr_t start = reinterpret_cast<uintptr_t>(openmmMetalMetallibStart);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(openmmMetalMetallibEnd);
+    if (end <= start)
+        throw OpenMMException("The embedded OpenMM Metal library is empty");
+    return unique_ptr<MetalProgram>(new MetalProgram(
+            queue, openmmMetalMetallibStart,
+            static_cast<size_t>(end-start)));
+}
+#endif
 
 } // namespace
 
@@ -285,7 +304,11 @@ void MetalCalcHarmonicBondForceKernel::initialize(const System& system, const Ha
         impl->parameters->upload(static_cast<const void*>(impl->hostParameters.data()), true);
     }
 
+#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
+    impl->program = loadProductionMetalProgram(queue);
+#else
     impl->program.reset(new MetalProgram(queue, MetalKernelSources::harmonicBond));
+#endif
     impl->kernel = impl->program->createMetalKernel("computeHarmonicBonds");
     impl->kernel->addArg(impl->context->getPositions());
     impl->kernel->addArg(impl->context->getForces());
@@ -388,7 +411,11 @@ void MetalIntegrateVerletStepKernel::initialize(const System& system, const Verl
         impl->masses[i] = system.getParticleMass(i);
 
     MetalQueue& queue = impl->context->getQueue();
+#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
+    impl->program = loadProductionMetalProgram(queue);
+#else
     impl->program.reset(new MetalProgram(queue, MetalKernelSources::verlet));
+#endif
     impl->kernel = impl->program->createMetalKernel("integrateVerlet");
     impl->kernel->addArg(impl->context->getPositions());
     impl->kernel->addArg(impl->context->getVelocities());
