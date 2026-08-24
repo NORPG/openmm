@@ -1,7 +1,10 @@
+set_source_files_properties(${METAL_KERNELS_CPP} ${METAL_KERNELS_H}
+    PROPERTIES GENERATED TRUE)
 add_library(${SHARED_TARGET} SHARED
     ${SOURCE_FILES}
     ${SOURCE_INCLUDE_FILES}
     ${API_ABS_INCLUDE_FILES})
+add_dependencies(${SHARED_TARGET} GenerateMetalKernelSources)
 
 target_link_libraries(${SHARED_TARGET}
     PUBLIC

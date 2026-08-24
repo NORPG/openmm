@@ -2,6 +2,7 @@
 #include "MetalDeviceCaps.h"
 #include "MetalEvent.h"
 #include "MetalProgram.h"
+#include "MetalTestKernelSources.h"
 #include "openmm/OpenMMException.h"
 
 #include <cmath>
@@ -14,33 +15,6 @@ using namespace OpenMM;
 using namespace std;
 
 namespace {
-
-const char* vectorSource = R"METAL(
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void vectorAdd(device const float* a [[buffer(0)]],
-                      device const float* b [[buffer(1)]],
-                      device float* result [[buffer(2)]],
-                      constant uint& count [[buffer(3)]],
-                      uint index [[thread_position_in_grid]]) {
-    if (index < count)
-        result[index] = a[index]+b[index];
-}
-
-struct VectorArguments {
-    device const float* a [[id(0)]];
-    device const float* b [[id(1)]];
-    device float* result [[id(2)]];
-    uint count [[id(3)]];
-};
-
-kernel void vectorAddArgumentBuffer(constant VectorArguments& args [[buffer(0)]],
-                                    uint index [[thread_position_in_grid]]) {
-    if (index < args.count)
-        args.result[index] = args.a[index]+args.b[index];
-}
-)METAL";
 
 void assertVector(const vector<float>& actual, const vector<float>& expected, const string& description) {
     if (actual.size() != expected.size())
@@ -98,7 +72,7 @@ int main() {
             b.upload(bData.data(), false);
             a.uploadSubArray(patch, 31, 3, false);
 
-            MetalProgram program(queue, vectorSource);
+            MetalProgram program(queue, MetalTestKernelSources::vectorAdd);
             shared_ptr<MetalKernel> direct = program.createMetalKernel("vectorAdd");
             bindVectorKernel(direct, a, b, directResult, count);
             direct->execute(count);

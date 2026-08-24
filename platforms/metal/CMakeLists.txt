@@ -57,6 +57,39 @@ endforeach()
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/../common/include)
 
+# Keep hand-written MSL in standalone .metal files.  At build time, encode
+# those files into a private C++ source container just like OpenMM's existing
+# CUDA, HIP, and OpenCL backends do.  The installed plugin is therefore
+# self-contained and never depends on locating the source tree at runtime.
+set(METAL_KERNEL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+set(METAL_KERNEL_SOURCE_CLASS MetalKernelSources)
+set(METAL_KERNELS_CPP "${CMAKE_CURRENT_BINARY_DIR}/src/${METAL_KERNEL_SOURCE_CLASS}.cpp")
+set(METAL_KERNELS_H "${CMAKE_CURRENT_BINARY_DIR}/src/${METAL_KERNEL_SOURCE_CLASS}.h")
+file(GLOB METAL_KERNEL_FILES CONFIGURE_DEPENDS
+    "${METAL_KERNEL_SOURCE_DIR}/kernels/*.metal")
+add_custom_command(
+    OUTPUT "${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DKERNEL_SOURCE_DIR=${METAL_KERNEL_SOURCE_DIR}"
+        "-DKERNELS_CPP=${METAL_KERNELS_CPP}"
+        "-DKERNELS_H=${METAL_KERNELS_H}"
+        "-DKERNEL_SOURCE_CLASS=${METAL_KERNEL_SOURCE_CLASS}"
+        -DKERNEL_FILE_EXTENSION=metal
+        -P "${CMAKE_SOURCE_DIR}/cmake_modules/EncodeKernelFiles.cmake"
+    DEPENDS
+        ${METAL_KERNEL_FILES}
+        "${METAL_KERNEL_SOURCE_DIR}/${METAL_KERNEL_SOURCE_CLASS}.cpp.in"
+        "${METAL_KERNEL_SOURCE_DIR}/${METAL_KERNEL_SOURCE_CLASS}.h.in"
+        "${CMAKE_SOURCE_DIR}/cmake_modules/EncodeKernelFiles.cmake"
+    VERBATIM)
+set_source_files_properties("${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}"
+    PROPERTIES GENERATED TRUE)
+add_custom_target(GenerateMetalKernelSources
+    DEPENDS "${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}")
+list(APPEND SOURCE_FILES "${METAL_KERNELS_CPP}")
+list(APPEND SOURCE_INCLUDE_FILES "${METAL_KERNELS_H}")
+include_directories(BEFORE "${CMAKE_CURRENT_BINARY_DIR}/src")
+
 file(GLOB CORE_HEADERS include/*.h)
 install(FILES ${CORE_HEADERS} DESTINATION include/openmm/metal)
 

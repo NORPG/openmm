@@ -1,0 +1,16 @@
+#ifndef OPENMM_METALTESTKERNELSOURCES_H_
+#define OPENMM_METALTESTKERNELSOURCES_H_
+
+#include <string>
+
+namespace OpenMM {
+
+/** Build-generated accessors for standalone MSL used by runtime tests. */
+class MetalTestKernelSources {
+public:
+@KERNEL_FILE_DECLARATIONS@
+};
+
+} // namespace OpenMM
+
+#endif /*OPENMM_METALTESTKERNELSOURCES_H_*/

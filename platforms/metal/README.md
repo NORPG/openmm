@@ -4,6 +4,12 @@ This directory contains a native Metal backend.  It compiles Metal Shading
 Language directly through the public Metal API and does not use OpenCL or
 `cl2Metal`.
 
+Hand-written MSL lives only in standalone `src/kernels/*.metal` files.  During
+the build, OpenMM's kernel-source encoder places those sources in a private
+generated C++ container so the installed shared or static plugin remains
+self-contained.  The implementation never reads kernel files from the source
+tree at runtime.
+
 ## Phase 1 support boundary
 
 Phase 1 is a deliberately small, executable vertical slice:
