@@ -1,8 +1,21 @@
 # OpenMM native Metal platform (experimental)
 
-This directory contains a native Metal backend.  It compiles Metal Shading
-Language directly through the public Metal API and does not use OpenCL or
-`cl2Metal`.
+This directory contains a native Metal backend.  The host runtime is written
+in Swift, while OpenMM's existing implementation remains C++ and calls it
+through the private, C-compatible ABI in `src/MetalSwiftBridge.h`.  No
+Objective-C++ source or compiler mode is used.
+
+Production Metal Shading Language lives only in `kernels/*.metal`.  The build
+uses Xcode's `metal` and `metallib` tools to compile those files offline, then
+embeds the resulting metallib in both the shared and static libraries.  The
+installed plugin therefore has no external kernel-resource dependency.  The
+runtime can still compile MSL source for future generated kernels; that path is
+tested with the standalone source in `tests/kernels/RuntimeTestKernels.metal`.
+
+This backend does not use OpenCL or `cl2Metal`.  Removing Objective-C++ does not
+mean removing Apple's Objective-C runtime: Swift's public Metal framework
+overlay interoperates with the system framework through Apple's supported
+runtime.  No Objective-C or Objective-C++ type crosses the C ABI.
 
 ## Phase 1 support boundary
 
@@ -28,12 +41,15 @@ so callers must select `Metal` explicitly during this experimental phase.
 
 ## Build and validate
 
-Configure OpenMM with `OPENMM_BUILD_METAL_LIB=ON`.  The focused test targets are:
+The build requires CMake 3.29 or newer, Swift 6.3 or newer, the macOS SDK, and
+Xcode's optional Metal Toolchain component.  Configure OpenMM with
+`OPENMM_BUILD_METAL_LIB=ON`.  The focused test targets are:
 
 - `TestMetalPlatform`: plugin registration, device properties, and the required
   OpenMM kernel-factory surface
-- `TestMetalRuntime`: buffers, transfers, queues, events, runtime MSL compilation,
-  direct argument binding, and Tier 2 argument buffers
+- `TestMetalRuntime`: buffers, transfers, queues, events, runtime MSL
+  compilation, direct argument binding, Tier 2 argument buffers, resize after
+  kernel binding, and C++ wrapper lifetime independence
 - `TestMetalVerticalSlice`: analytic force/energy values, Verlet state changes,
   Reference trajectory comparison, parameter updates, checkpoint replay,
   minimization, shared-particle bond accumulation, and rejection of unsupported

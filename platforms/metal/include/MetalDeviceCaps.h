@@ -56,7 +56,7 @@ public:
     bool supportsMetal4Family() const;
 
 private:
-    static MetalDeviceCaps fromNativeDevice(void* device);
+    static MetalDeviceCaps fromBridgeSnapshot(const void* snapshot);
 
     std::string name;
     uint64_t registryId = 0;

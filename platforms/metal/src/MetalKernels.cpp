@@ -45,6 +45,9 @@
 using namespace OpenMM;
 using namespace std;
 
+extern "C" const unsigned char openmmMetalMetallibStart[];
+extern "C" const unsigned char openmmMetalMetallibEnd[];
+
 namespace {
 
 struct MetalBondIndex {
@@ -56,75 +59,6 @@ struct MetalBondParameter {
     float length;
     float k;
 };
-
-const char* harmonicBondSource = R"METAL(
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void computeHarmonicBonds(device const float4* positions [[buffer(0)]],
-                                 device float4* forces [[buffer(1)]],
-                                 device const uint2* bonds [[buffer(2)]],
-                                 device const float2* parameters [[buffer(3)]],
-                                 device float* energyByParticle [[buffer(4)]],
-                                 constant uint& numParticles [[buffer(5)]],
-                                 constant uint& numBonds [[buffer(6)]],
-                                 constant uint& includeForces [[buffer(7)]],
-                                 constant uint& includeEnergy [[buffer(8)]],
-                                 uint particle [[thread_position_in_grid]]) {
-    if (particle >= numParticles)
-        return;
-
-    float3 particleForce = float3(0.0f);
-    float particleEnergy = 0.0f;
-    for (uint bond = 0; bond < numBonds; bond++) {
-        const uint2 atoms = bonds[bond];
-        if (particle != atoms.x && particle != atoms.y)
-            continue;
-
-        const float3 delta = positions[atoms.y].xyz-positions[atoms.x].xyz;
-        const float distance = length(delta);
-        const float2 parameter = parameters[bond];
-        const float displacement = distance-parameter.x;
-        if (includeForces != 0 && distance > 0.0f) {
-            const float3 forceOnFirst = (parameter.y*displacement/distance)*delta;
-            if (particle == atoms.x)
-                particleForce += forceOnFirst;
-            if (particle == atoms.y)
-                particleForce -= forceOnFirst;
-        }
-        // Assign each bond's energy to its first endpoint so it is counted once.
-        if (includeEnergy != 0 && particle == atoms.x)
-            particleEnergy += 0.5f*parameter.y*displacement*displacement;
-    }
-    if (includeForces != 0)
-        forces[particle] += float4(particleForce, 0.0f);
-    energyByParticle[particle] = includeEnergy == 0 ? 0.0f : particleEnergy;
-}
-)METAL";
-
-const char* verletSource = R"METAL(
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void integrateVerlet(device float4* positions [[buffer(0)]],
-                            device float4* velocities [[buffer(1)]],
-                            device const float4* forces [[buffer(2)]],
-                            device const float* inverseMasses [[buffer(3)]],
-                            constant float& stepSize [[buffer(4)]],
-                            constant uint& numParticles [[buffer(5)]],
-                            uint particle [[thread_position_in_grid]]) {
-    if (particle >= numParticles)
-        return;
-    const float inverseMass = inverseMasses[particle];
-    if (inverseMass == 0.0f)
-        return;
-    float3 velocity = velocities[particle].xyz;
-    velocity += stepSize*inverseMass*forces[particle].xyz;
-    const float3 position = positions[particle].xyz+stepSize*velocity;
-    velocities[particle] = float4(velocity, 0.0f);
-    positions[particle] = float4(position, 0.0f);
-}
-)METAL";
 
 MetalContext& getMetalContext(ContextImpl& context) {
     return MetalPlatform::getMetalContext(context);
@@ -353,7 +287,8 @@ void MetalCalcHarmonicBondForceKernel::initialize(const System& system, const Ha
         impl->parameters->upload(static_cast<const void*>(impl->hostParameters.data()), true);
     }
 
-    impl->program.reset(new MetalProgram(queue, harmonicBondSource));
+    impl->program.reset(new MetalProgram(queue, openmmMetalMetallibStart,
+            static_cast<size_t>(openmmMetalMetallibEnd-openmmMetalMetallibStart)));
     impl->kernel = impl->program->createMetalKernel("computeHarmonicBonds");
     impl->kernel->addArg(impl->context->getPositions());
     impl->kernel->addArg(impl->context->getForces());
@@ -456,7 +391,8 @@ void MetalIntegrateVerletStepKernel::initialize(const System& system, const Verl
         impl->masses[i] = system.getParticleMass(i);
 
     MetalQueue& queue = impl->context->getQueue();
-    impl->program.reset(new MetalProgram(queue, verletSource));
+    impl->program.reset(new MetalProgram(queue, openmmMetalMetallibStart,
+            static_cast<size_t>(openmmMetalMetallibEnd-openmmMetalMetallibStart)));
     impl->kernel = impl->program->createMetalKernel("integrateVerlet");
     impl->kernel->addArg(impl->context->getPositions());
     impl->kernel->addArg(impl->context->getVelocities());

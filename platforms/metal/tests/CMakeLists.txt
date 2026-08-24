@@ -2,16 +2,15 @@ if(OPENMM_BUILD_SHARED_LIB)
     add_executable(TestMetalPlatform TestMetalPlatform.cpp)
     target_link_libraries(TestMetalPlatform PRIVATE ${SHARED_TARGET})
     set_target_properties(TestMetalPlatform PROPERTIES
-        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalPlatform COMMAND TestMetalPlatform)
 
-    add_executable(TestMetalRuntime TestMetalRuntime.mm)
-    target_link_libraries(TestMetalRuntime PRIVATE ${SHARED_TARGET} ${FOUNDATION_FRAMEWORK})
-    target_compile_options(TestMetalRuntime PRIVATE -fobjc-arc)
+    add_executable(TestMetalRuntime TestMetalRuntime.cpp)
+    target_link_libraries(TestMetalRuntime PRIVATE ${SHARED_TARGET})
+    target_compile_definitions(TestMetalRuntime PRIVATE
+        OPENMM_METAL_RUNTIME_TEST_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/kernels/RuntimeTestKernels.metal")
     set_target_properties(TestMetalRuntime PROPERTIES
-        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalRuntime COMMAND TestMetalRuntime)
@@ -19,7 +18,6 @@ if(OPENMM_BUILD_SHARED_LIB)
     add_executable(TestMetalVerticalSlice TestMetalVerticalSlice.cpp)
     target_link_libraries(TestMetalVerticalSlice PRIVATE ${SHARED_TARGET})
     set_target_properties(TestMetalVerticalSlice PROPERTIES
-        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalVerticalSlice COMMAND TestMetalVerticalSlice)
@@ -32,19 +30,17 @@ if(OPENMM_BUILD_STATIC_LIB)
         OPENMM_USE_STATIC_LIBRARIES
         OPENMM_METAL_USE_STATIC_LIBRARIES)
     set_target_properties(TestMetalPlatformStatic PROPERTIES
-        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalPlatformStatic COMMAND TestMetalPlatformStatic)
 
-    add_executable(TestMetalRuntimeStatic TestMetalRuntime.mm)
-    target_link_libraries(TestMetalRuntimeStatic PRIVATE ${STATIC_TARGET} ${FOUNDATION_FRAMEWORK})
+    add_executable(TestMetalRuntimeStatic TestMetalRuntime.cpp)
+    target_link_libraries(TestMetalRuntimeStatic PRIVATE ${STATIC_TARGET})
     target_compile_definitions(TestMetalRuntimeStatic PRIVATE
         OPENMM_USE_STATIC_LIBRARIES
-        OPENMM_METAL_USE_STATIC_LIBRARIES)
-    target_compile_options(TestMetalRuntimeStatic PRIVATE -fobjc-arc)
+        OPENMM_METAL_USE_STATIC_LIBRARIES
+        OPENMM_METAL_RUNTIME_TEST_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/kernels/RuntimeTestKernels.metal")
     set_target_properties(TestMetalRuntimeStatic PROPERTIES
-        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalRuntimeStatic COMMAND TestMetalRuntimeStatic)
@@ -55,7 +51,6 @@ if(OPENMM_BUILD_STATIC_LIB)
         OPENMM_USE_STATIC_LIBRARIES
         OPENMM_METAL_USE_STATIC_LIBRARIES)
     set_target_properties(TestMetalVerticalSliceStatic PROPERTIES
-        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalVerticalSliceStatic COMMAND TestMetalVerticalSliceStatic)
