@@ -25,6 +25,8 @@ Phase 1 is a deliberately small, executable vertical slice:
 - one built-in GPU (`DeviceIndex=0`)
 - single precision
 - `HarmonicBondForce` without periodic boundary conditions
+- `NonbondedForce` with `NoCutoff` Coulomb and Lennard-Jones interactions,
+  including exceptions and in-context parameter updates
 - `VerletIntegrator`
 - `LocalEnergyMinimizer` (CPU optimization control with Metal force evaluations)
 - systems without constraints or virtual sites
@@ -33,6 +35,10 @@ The harmonic-bond kernel supports any bond topology, including multiple bonds
 that share a particle.  It avoids device atomics by assigning one GPU thread to
 each particle and scanning the bond list.  This is correct but intentionally not
 the performance design for the full backend.
+
+The nonbonded path is owned by a Swift model that validates exception topology,
+packs typed parameter buffers, and manages execution and updates.  Cutoff and
+periodic methods, Ewald/PME/LJPME, and parameter offsets are not yet supported.
 
 All other forces, integrators, precisions, devices, constraints, virtual sites,
 and multi-GPU execution are outside this phase and are rejected explicitly.
@@ -54,6 +60,9 @@ Xcode's optional Metal Toolchain component.  Configure OpenMM with
   Reference trajectory comparison, parameter updates, checkpoint replay,
   minimization, shared-particle bond accumulation, and rejection of unsupported
   features
+- `TestMetalNonbondedForce`: analytic Coulomb/Lennard-Jones values, exceptions,
+  parameter updates, force groups, execution flags, threadgroup boundaries, and
+  a trajectory comparison against the Reference platform
 
 Passing these tests proves the native runtime and the documented vertical slice.
 It does not claim coverage of OpenMM's full kernel corpus or Intel/AMD Metal

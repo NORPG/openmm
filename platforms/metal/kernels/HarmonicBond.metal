@@ -38,8 +38,5 @@ kernel void computeHarmonicBonds(device const float4* positions [[buffer(0)]],
     }
     if (includeForces != 0)
         forces[particle] += float4(particleForce, 0.0f);
-    if (includeEnergy != 0)
-        energyByParticle[particle] += particleEnergy;
-    else
-        energyByParticle[particle] = 0.0f;
+    energyByParticle[particle] = includeEnergy == 0 ? 0.0f : particleEnergy;
 }

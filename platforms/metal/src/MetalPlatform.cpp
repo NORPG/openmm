@@ -4,6 +4,7 @@
 #include "MetalKernelFactory.h"
 #include "openmm/Context.h"
 #include "openmm/HarmonicBondForce.h"
+#include "openmm/NonbondedForce.h"
 #include "openmm/OpenMMException.h"
 #include "openmm/System.h"
 #include "openmm/kernels.h"
@@ -83,6 +84,7 @@ MetalPlatform::MetalPlatform() {
     registerKernelFactory(VirtualSitesKernel::Name(), factory);
     registerKernelFactory(MinimizeKernel::Name(), factory);
     registerKernelFactory(CalcHarmonicBondForceKernel::Name(), factory);
+    registerKernelFactory(CalcNonbondedForceKernel::Name(), factory);
     registerKernelFactory(IntegrateVerletStepKernel::Name(), factory);
 }
 
@@ -189,11 +191,19 @@ void MetalPlatform::contextCreated(ContextImpl& context, const map<string, strin
         if (system.isVirtualSite(i))
             throw OpenMMException("The first native Metal phase does not yet support virtual sites");
     for (int i = 0; i < system.getNumForces(); i++) {
-        const HarmonicBondForce* force = dynamic_cast<const HarmonicBondForce*>(&system.getForce(i));
-        if (force == NULL)
-            throw OpenMMException("The first native Metal phase supports only HarmonicBondForce");
-        if (force->usesPeriodicBoundaryConditions())
+        const HarmonicBondForce* harmonic = dynamic_cast<const HarmonicBondForce*>(&system.getForce(i));
+        const NonbondedForce* nonbonded = dynamic_cast<const NonbondedForce*>(&system.getForce(i));
+        if (harmonic == NULL && nonbonded == NULL)
+            throw OpenMMException("The native Metal backend currently supports only HarmonicBondForce and NonbondedForce");
+        if (harmonic != NULL && harmonic->usesPeriodicBoundaryConditions())
             throw OpenMMException("The first native Metal phase does not yet support periodic harmonic bonds");
+        if (nonbonded != NULL) {
+            if (nonbonded->getNonbondedMethod() != NonbondedForce::NoCutoff)
+                throw OpenMMException("The native Metal backend currently supports only NoCutoff NonbondedForce");
+            if (nonbonded->getNumParticleParameterOffsets() != 0 ||
+                    nonbonded->getNumExceptionParameterOffsets() != 0)
+                throw OpenMMException("The native Metal backend does not yet support NonbondedForce parameter offsets");
+        }
     }
 
     context.setPlatformData(new PlatformData(system, 0, actualName, precision));

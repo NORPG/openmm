@@ -10,24 +10,24 @@
 import Dispatch
 import Darwin
 
-private let bridgeSuccess: Int32 = 0
-private let bridgeInvalidArgument: Int32 = 1
-private let bridgeOutOfRange: Int32 = 2
-private let bridgeUnsupported: Int32 = 3
-private let bridgeNativeError: Int32 = 4
-private let bridgeInvalidUTF8: Int32 = 5
-private let bridgeInternalError: Int32 = 255
+let bridgeSuccess: Int32 = 0
+let bridgeInvalidArgument: Int32 = 1
+let bridgeOutOfRange: Int32 = 2
+let bridgeUnsupported: Int32 = 3
+let bridgeNativeError: Int32 = 4
+let bridgeInvalidUTF8: Int32 = 5
+let bridgeInternalError: Int32 = 255
 
-private struct BridgeFailure: Error {
+struct BridgeFailure: Error {
     let code: Int32
     let message: String
 }
 
-private func failure(_ code: Int32, _ message: String) -> BridgeFailure {
+func failure(_ code: Int32, _ message: String) -> BridgeFailure {
     BridgeFailure(code: code, message: message)
 }
 
-private func errorDescription(_ error: Error) -> String {
+func errorDescription(_ error: Error) -> String {
     if let bridge = error as? BridgeFailure {
         return bridge.message
     }
@@ -39,12 +39,12 @@ private func errorDescription(_ error: Error) -> String {
     return result.isEmpty ? String(describing: error) : result
 }
 
-private func prepareError(_ output: UnsafeMutablePointer<OMMMetalErrorC>?) {
+func prepareError(_ output: UnsafeMutablePointer<OMMMetalErrorC>?) {
     output?.pointee.code = bridgeSuccess
     output?.pointee.message = nil
 }
 
-private func reportError(_ error: Error, to output: UnsafeMutablePointer<OMMMetalErrorC>?) -> Int32 {
+func reportError(_ error: Error, to output: UnsafeMutablePointer<OMMMetalErrorC>?) -> Int32 {
     let code = (error as? BridgeFailure)?.code ?? bridgeNativeError
     output?.pointee.code = code
     output?.pointee.message = errorDescription(error).withCString { strdup($0) }
@@ -52,8 +52,8 @@ private func reportError(_ error: Error, to output: UnsafeMutablePointer<OMMMeta
 }
 
 @discardableResult
-private func bridgeCall(_ errorOutput: UnsafeMutablePointer<OMMMetalErrorC>?,
-                        _ body: () throws -> Void) -> Int32 {
+func bridgeCall(_ errorOutput: UnsafeMutablePointer<OMMMetalErrorC>?,
+                _ body: () throws -> Void) -> Int32 {
     prepareError(errorOutput)
     do {
         try autoreleasepool(invoking: body)
@@ -82,22 +82,22 @@ private func decodeUTF8(_ pointer: UnsafePointer<CChar>?, _ length: Int,
     return result
 }
 
-private func checkedInt(_ value: UInt, _ description: String) throws -> Int {
+func checkedInt(_ value: UInt, _ description: String) throws -> Int {
     guard value <= UInt(Int.max) else {
         throw failure(bridgeOutOfRange, "\(description) exceeds the native address range")
     }
     return Int(value)
 }
 
-private func bridgeObject<T: AnyObject>(_ handle: UnsafeMutableRawPointer?,
-                                         as type: T.Type, _ description: String) throws -> T {
+func bridgeObject<T: AnyObject>(_ handle: UnsafeMutableRawPointer?,
+                                as type: T.Type, _ description: String) throws -> T {
     guard let handle else {
         throw failure(bridgeInvalidArgument, "\(description) is null")
     }
     return Unmanaged<T>.fromOpaque(handle).takeUnretainedValue()
 }
 
-private extension NSLock {
+extension NSLock {
     func withBridgeLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }
@@ -105,7 +105,7 @@ private extension NSLock {
     }
 }
 
-private struct DeviceSnapshot {
+struct DeviceSnapshot {
     let name: String
     let registryId: UInt64
     let lowPower: Bool
@@ -198,7 +198,7 @@ private final class RetainedResources: @unchecked Sendable {
     }
 }
 
-private final class QueueBox: @unchecked Sendable {
+final class QueueBox: @unchecked Sendable {
     let device: any MTLDevice
     let commandQueue: any MTLCommandQueue
     let caps: DeviceSnapshot
@@ -343,7 +343,7 @@ private final class QueueBox: @unchecked Sendable {
     }
 }
 
-private final class BufferBox: @unchecked Sendable {
+final class BufferBox: @unchecked Sendable {
     let queue: QueueBox
     let name: String
     private let stateLock = NSLock()
@@ -389,6 +389,65 @@ private final class BufferBox: @unchecked Sendable {
             }
         }
     }
+
+    func upload(from source: UnsafeRawPointer, byteOffset offset: Int,
+                byteCount bytes: Int, blocking: Bool) throws {
+        try validate(offset: offset, bytes: bytes, operation: "Metal buffer upload")
+        if bytes == 0 { return }
+        try queue.checkForErrors()
+        guard let staging = queue.device.makeBuffer(length: bytes,
+                                                    options: .storageModeShared) else {
+            throw failure(bridgeNativeError,
+                          "Error allocating Metal staging buffer for uploading \(name) (\(bytes) bytes)")
+        }
+        memcpy(staging.contents(), source, bytes)
+
+        try queue.submissionLock.withBridgeLock {
+            let command = try queue.makeCommandBuffer("upload \(name)")
+            guard let encoder = command.makeBlitCommandEncoder() else {
+                throw failure(bridgeNativeError,
+                              "Metal failed to create a blit encoder for uploading \(name)")
+            }
+            let destination = snapshot()
+            encoder.copy(from: staging, sourceOffset: 0, to: destination,
+                         destinationOffset: offset, size: bytes)
+            encoder.endEncoding()
+            try queue.submitLocked(command, blocking: blocking,
+                                   retainedResources: [staging as AnyObject,
+                                                       destination as AnyObject])
+        }
+    }
+
+    func download(to destination: UnsafeMutableRawPointer, byteOffset offset: Int,
+                  byteCount bytes: Int, blocking: Bool) throws {
+        try validate(offset: offset, bytes: bytes, operation: "Metal buffer download")
+        if bytes == 0 { return }
+        try queue.checkForErrors()
+        guard let staging = queue.device.makeBuffer(length: bytes,
+                                                    options: .storageModeShared) else {
+            throw failure(bridgeNativeError,
+                          "Error allocating Metal staging buffer for downloading \(name) (\(bytes) bytes)")
+        }
+        let request = DownloadRequest(destination: destination, staging: staging,
+                                      byteCount: bytes)
+
+        try queue.submissionLock.withBridgeLock {
+            let command = try queue.makeCommandBuffer("download \(name)")
+            guard let encoder = command.makeBlitCommandEncoder() else {
+                throw failure(bridgeNativeError,
+                              "Metal failed to create a blit encoder for downloading \(name)")
+            }
+            let source = snapshot()
+            encoder.copy(from: source, sourceOffset: offset, to: staging,
+                         destinationOffset: 0, size: bytes)
+            encoder.endEncoding()
+            try queue.submitLocked(command, blocking: blocking,
+                                   retainedResources: [source as AnyObject,
+                                                       staging as AnyObject]) {
+                request.complete($0)
+            }
+        }
+    }
 }
 
 private final class DownloadRequest: @unchecked Sendable {
@@ -409,7 +468,7 @@ private final class DownloadRequest: @unchecked Sendable {
     }
 }
 
-private final class ProgramBox: @unchecked Sendable {
+final class ProgramBox: @unchecked Sendable {
     let queue: QueueBox
     let library: any MTLLibrary
 
@@ -489,15 +548,15 @@ private func argumentConstantSize(_ type: MTLDataType) -> Int? {
     }
 }
 
-private final class KernelBox: @unchecked Sendable {
+final class KernelBox: @unchecked Sendable {
     let queue: QueueBox
-    let function: any MTLFunction
-    let pipeline: any MTLComputePipelineState
-    let argumentEncoder: (any MTLArgumentEncoder)?
+    private let function: any MTLFunction
+    private let pipeline: any MTLComputePipelineState
+    private let argumentEncoder: (any MTLArgumentEncoder)?
     let name: String
-    let bindingMode: Int32
-    let argumentBufferIndex: Int
-    let argumentBufferSlots: [Int: ArgumentBufferSlot]
+    private let bindingMode: Int32
+    private let argumentBufferIndex: Int
+    private let argumentBufferSlots: [Int: ArgumentBufferSlot]
 
     private let stateLock = NSLock()
     private var arguments: [KernelArgument] = []
@@ -1013,28 +1072,8 @@ func bridgeBufferUpload(_ handle: OMMMetalBufferRef?, _ byteOffset: UInt,
         guard let source else {
             throw failure(bridgeInvalidArgument, "Metal upload source is null")
         }
-        try buffer.queue.checkForErrors()
-        guard let staging = buffer.queue.device.makeBuffer(length: bytes,
-                                                           options: .storageModeShared) else {
-            throw failure(bridgeNativeError,
-                          "Error allocating Metal staging buffer for uploading \(buffer.name) (\(bytes) bytes)")
-        }
-        memcpy(staging.contents(), source, bytes)
-
-        try buffer.queue.submissionLock.withBridgeLock {
-            let command = try buffer.queue.makeCommandBuffer("upload \(buffer.name)")
-            guard let encoder = command.makeBlitCommandEncoder() else {
-                throw failure(bridgeNativeError,
-                              "Metal failed to create a blit encoder for uploading \(buffer.name)")
-            }
-            let destination = buffer.snapshot()
-            encoder.copy(from: staging, sourceOffset: 0, to: destination,
-                         destinationOffset: offset, size: bytes)
-            encoder.endEncoding()
-            try buffer.queue.submitLocked(command, blocking: blocking != 0,
-                                          retainedResources: [staging as AnyObject,
-                                                              destination as AnyObject])
-        }
+        try buffer.upload(from: source, byteOffset: offset, byteCount: bytes,
+                          blocking: blocking != 0)
     }
 }
 
@@ -1052,31 +1091,8 @@ func bridgeBufferDownload(_ handle: OMMMetalBufferRef?, _ byteOffset: UInt,
         guard let destination else {
             throw failure(bridgeInvalidArgument, "Metal download destination is null")
         }
-        try buffer.queue.checkForErrors()
-        guard let staging = buffer.queue.device.makeBuffer(length: bytes,
-                                                           options: .storageModeShared) else {
-            throw failure(bridgeNativeError,
-                          "Error allocating Metal staging buffer for downloading \(buffer.name) (\(bytes) bytes)")
-        }
-        let request = DownloadRequest(destination: destination, staging: staging,
-                                      byteCount: bytes)
-
-        try buffer.queue.submissionLock.withBridgeLock {
-            let command = try buffer.queue.makeCommandBuffer("download \(buffer.name)")
-            guard let encoder = command.makeBlitCommandEncoder() else {
-                throw failure(bridgeNativeError,
-                              "Metal failed to create a blit encoder for downloading \(buffer.name)")
-            }
-            let source = buffer.snapshot()
-            encoder.copy(from: source, sourceOffset: offset, to: staging,
-                         destinationOffset: 0, size: bytes)
-            encoder.endEncoding()
-            try buffer.queue.submitLocked(command, blocking: blocking != 0,
-                                          retainedResources: [source as AnyObject,
-                                                              staging as AnyObject]) {
-                request.complete($0)
-            }
-        }
+        try buffer.download(to: destination, byteOffset: offset, byteCount: bytes,
+                            blocking: blocking != 0)
     }
 }
 

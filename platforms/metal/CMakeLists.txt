@@ -106,6 +106,7 @@ set(OPENMM_METAL_SWIFT_BRIDGE_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/MetalSwift
 # is covered by a separate test-only .metal source.
 set(OPENMM_METAL_KERNEL_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/HarmonicBond.metal"
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/Nonbonded.metal"
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/Verlet.metal")
 set(OPENMM_METAL_KERNEL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/kernels")
 set(OPENMM_METAL_MODULE_CACHE "${CMAKE_CURRENT_BINARY_DIR}/metal-module-cache")

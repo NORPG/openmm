@@ -19,6 +19,8 @@ KernelImpl* MetalKernelFactory::createKernelImpl(string name, const Platform& pl
         return new MetalMinimizeKernel(name, platform);
     if (name == CalcHarmonicBondForceKernel::Name())
         return new MetalCalcHarmonicBondForceKernel(name, platform, context);
+    if (name == CalcNonbondedForceKernel::Name())
+        return new MetalCalcNonbondedForceKernel(name, platform, context);
     if (name == IntegrateVerletStepKernel::Name())
         return new MetalIntegrateVerletStepKernel(name, platform, context);
     throw OpenMMException("The Metal kernel '"+name+"' has not been implemented");

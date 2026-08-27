@@ -21,6 +21,13 @@ if(OPENMM_BUILD_SHARED_LIB)
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalVerticalSlice COMMAND TestMetalVerticalSlice)
+
+    add_executable(TestMetalNonbondedForce TestMetalNonbondedForce.cpp)
+    target_link_libraries(TestMetalNonbondedForce PRIVATE ${SHARED_TARGET})
+    set_target_properties(TestMetalNonbondedForce PROPERTIES
+        COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
+        MACOSX_DEPLOYMENT_TARGET "13.0")
+    add_test(NAME TestMetalNonbondedForce COMMAND TestMetalNonbondedForce)
 endif()
 
 if(OPENMM_BUILD_STATIC_LIB)
@@ -54,4 +61,14 @@ if(OPENMM_BUILD_STATIC_LIB)
         COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
         MACOSX_DEPLOYMENT_TARGET "13.0")
     add_test(NAME TestMetalVerticalSliceStatic COMMAND TestMetalVerticalSliceStatic)
+
+    add_executable(TestMetalNonbondedForceStatic TestMetalNonbondedForce.cpp)
+    target_link_libraries(TestMetalNonbondedForceStatic PRIVATE ${STATIC_TARGET})
+    target_compile_definitions(TestMetalNonbondedForceStatic PRIVATE
+        OPENMM_USE_STATIC_LIBRARIES
+        OPENMM_METAL_USE_STATIC_LIBRARIES)
+    set_target_properties(TestMetalNonbondedForceStatic PROPERTIES
+        COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
+        MACOSX_DEPLOYMENT_TARGET "13.0")
+    add_test(NAME TestMetalNonbondedForceStatic COMMAND TestMetalNonbondedForceStatic)
 endif()

@@ -21,6 +21,7 @@ typedef void* OMMMetalBufferRef;
 typedef void* OMMMetalProgramRef;
 typedef void* OMMMetalKernelRef;
 typedef void* OMMMetalEventRef;
+typedef void* OMMMetalNonbondedRef;
 
 enum {
     OMM_METAL_SUCCESS = 0,
@@ -66,6 +67,22 @@ typedef struct OMMMetalDeviceCapsC {
     uint8_t metal4;
     char* name;
 } OMMMetalDeviceCapsC;
+
+/** Host values used to initialize or update one NonbondedForce particle. */
+typedef struct OMMMetalNonbondedParticleC {
+    double charge;
+    double sigma;
+    double epsilon;
+} OMMMetalNonbondedParticleC;
+
+/** Host values and immutable endpoints for one NonbondedForce exception. */
+typedef struct OMMMetalNonbondedExceptionC {
+    uint32_t particle1;
+    uint32_t particle2;
+    double chargeProd;
+    double sigma;
+    double epsilon;
+} OMMMetalNonbondedExceptionC;
 
 void OMMMetalErrorClear(OMMMetalErrorC* error);
 void OMMMetalDeviceCapsClear(OMMMetalDeviceCapsC* caps);
@@ -125,6 +142,29 @@ int32_t OMMMetalKernelSetBytes(OMMMetalKernelRef kernel, int32_t index,
                                const void* value, size_t size, OMMMetalErrorC* error);
 int32_t OMMMetalKernelExecute(OMMMetalKernelRef kernel, int32_t threads,
                               int32_t blockSize, OMMMetalErrorC* error);
+
+/**
+ * Create a Swift-owned NoCutoff nonbonded execution plan.  The plan retains
+ * the two context buffers and owns its topology, typed parameter buffers,
+ * pipeline, and energy reduction storage until OMMMetalNonbondedRelease().
+ */
+int32_t OMMMetalNonbondedCreate(
+        OMMMetalBufferRef positions, OMMMetalBufferRef forces,
+        const void* libraryBytes, size_t libraryLength,
+        const OMMMetalNonbondedParticleC* particles, size_t particleCount,
+        const OMMMetalNonbondedExceptionC* exceptions, size_t exceptionCount,
+        OMMMetalNonbondedRef* plan, OMMMetalErrorC* error);
+void OMMMetalNonbondedRelease(OMMMetalNonbondedRef plan);
+int32_t OMMMetalNonbondedExecute(OMMMetalNonbondedRef plan,
+                                 uint8_t includeForces, uint8_t includeEnergy,
+                                 double* energy, OMMMetalErrorC* error);
+int32_t OMMMetalNonbondedUpdate(
+        OMMMetalNonbondedRef plan,
+        const OMMMetalNonbondedParticleC* particles, size_t particleCount,
+        const OMMMetalNonbondedExceptionC* exceptions, size_t exceptionCount,
+        int32_t firstParticle, int32_t lastParticle,
+        int32_t firstException, int32_t lastException,
+        OMMMetalErrorC* error);
 
 int32_t OMMMetalEventCreate(OMMMetalQueueRef queue, OMMMetalEventRef* event,
                             OMMMetalErrorC* error);
