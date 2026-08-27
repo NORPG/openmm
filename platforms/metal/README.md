@@ -13,25 +13,29 @@ API at runtime.  Both paths produce self-contained plugins and never read the
 source tree at runtime.  Runtime MSL compilation also remains available through
 `MetalProgram` for future generated kernels.
 
-## Phase 1 support boundary
+## Current support boundary
 
-Phase 1 is a deliberately small, executable vertical slice:
+This is a deliberately small, executable vertical slice:
 
 - Apple Silicon on macOS 13 or newer
 - one built-in GPU (`DeviceIndex=0`)
 - single precision
 - `HarmonicBondForce` without periodic boundary conditions
+- `NonbondedForce` with `NoCutoff`, including Coulomb, Lennard-Jones,
+  exceptions, and particle/exception parameter updates
 - `VerletIntegrator`
 - `LocalEnergyMinimizer` (CPU optimization control with Metal force evaluations)
 - systems without constraints or virtual sites
 
-The harmonic-bond kernel supports any bond topology, including multiple bonds
-that share a particle.  It avoids device atomics by assigning one GPU thread to
-each particle and scanning the bond list.  This is correct but intentionally not
-the performance design for the full backend.
+The force kernels avoid device atomics by assigning one GPU thread to each
+particle.  The initial nonbonded path evaluates all particle pairs and uses a
+sorted CSR table for exceptions.  These kernels are correct but intentionally
+not the performance design for the full backend.
 
-All other forces, integrators, precisions, devices, constraints, virtual sites,
-and multi-GPU execution are outside this phase and are rejected explicitly.
+Cutoff, Ewald, PME, LJPME, and nonbonded parameter offsets are not yet
+implemented.  All other forces, integrators, precisions, devices, constraints,
+virtual sites, and multi-GPU execution are outside this phase and are rejected
+explicitly.
 The platform has a lower automatic-selection speed than the Reference platform,
 so callers must select `Metal` explicitly during this experimental phase.
 
@@ -56,6 +60,9 @@ The focused test targets are:
   Reference trajectory comparison, parameter updates, checkpoint replay,
   minimization, shared-particle bond accumulation, and rejection of unsupported
   features
+- `TestMetalNonbondedForce`: analytic Coulomb/Lennard-Jones values, exceptions,
+  parameter updates, force groups, include flags, multi-threadgroup execution,
+  Reference trajectory comparison, and rejection of unsupported methods
 
 Passing these tests proves the native runtime and the documented vertical slice.
 It does not claim coverage of OpenMM's full kernel corpus or Intel/AMD Metal
