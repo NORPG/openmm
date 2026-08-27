@@ -174,6 +174,10 @@ void testExceptionsAndParameterUpdates(MetalPlatform& platform) {
     ASSERT_EQUAL_VEC(restoredPair.forceOnFirst+exceptionPair.forceOnFirst,
                      state.getForces()[0], FORCE_TOL);
 
+    // Validate the complete candidate model before uploading either changed
+    // range.  A rejected topology update must not partially apply the particle
+    // update that was submitted in the same call.
+    force->setParticleParameters(1, -0.6, 0.6, 0.09);
     force->setExceptionParameters(exception02, 1, 2, -0.2, 0.9, 0.15);
     bool rejected = false;
     try {
@@ -183,6 +187,11 @@ void testExceptionsAndParameterUpdates(MetalPlatform& platform) {
         rejected = true;
     }
     ASSERT(rejected);
+    state = context.getState(State::Forces | State::Energy);
+    ASSERT_EQUAL_TOL(restoredPair.energy+exceptionPair.energy+regularPair.energy,
+                     state.getPotentialEnergy(), ENERGY_TOL);
+    ASSERT_EQUAL_VEC(restoredPair.forceOnFirst+exceptionPair.forceOnFirst,
+                     state.getForces()[0], FORCE_TOL);
 }
 
 void testMultipleForcesAndGroups(MetalPlatform& platform) {
