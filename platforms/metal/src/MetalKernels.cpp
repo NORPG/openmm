@@ -119,6 +119,7 @@ void MetalCalcForcesAndEnergyKernel::beginComputation(ContextImpl& context, bool
                                                        bool includeEnergy, int groups) {
     (void) includeEnergy;
     (void) groups;
+    getMetalContext(context).clearAutoclearBuffers();
     if (includeForce)
         getMetalContext(context).clearForces();
 }

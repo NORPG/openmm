@@ -114,6 +114,16 @@ endforeach()
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/../common/include)
 
+# MetalContext implements the ComputeContext interface, but the initial Metal
+# backend deliberately does not compile the full Common kernel stack.  These
+# three files are the minimal out-of-line implementation closure for the base
+# context, ComputeArray wrappers, and force metadata.
+set(METAL_COMMON_CONTEXT_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/ComputeArray.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/ComputeContext.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/ComputeForceInfo.cpp)
+list(APPEND SOURCE_FILES ${METAL_COMMON_CONTEXT_SOURCES})
+
 # Keep hand-written MSL in standalone .metal files.  With the full Xcode Metal
 # toolchain they are compiled offline and embedded as one metallib.  Otherwise
 # they are encoded into C++ and compiled at runtime.  Both products are fully

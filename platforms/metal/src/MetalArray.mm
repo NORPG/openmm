@@ -1,5 +1,7 @@
 #include "MetalArray.h"
+#include "MetalContext.h"
 #include "MetalInternal.h"
+#include "openmm/common/ComputeArray.h"
 
 #include <cstring>
 #include <limits>
@@ -71,11 +73,10 @@ MetalArray::~MetalArray() {
 }
 
 void MetalArray::initialize(ComputeContext& context, size_t size, int elementSize, const string& name) {
-    (void) context;
-    (void) size;
-    (void) elementSize;
-    (void) name;
-    throw OpenMMException("MetalArray::initialize(ComputeContext&) requires a Metal queue; use the Metal context integration overload");
+    MetalContext* metal = dynamic_cast<MetalContext*>(&context);
+    if (metal == NULL)
+        throw OpenMMException("MetalArray can only be initialized from a MetalContext");
+    initialize(context, metal->getQueue(), size, elementSize, name);
 }
 
 void MetalArray::initialize(MetalQueue& queue, size_t size, int elementSize, const string& name) {
@@ -208,7 +209,11 @@ void MetalArray::downloadSubArray(void* data, int offset, int elements, bool blo
 }
 
 void MetalArray::copyTo(ArrayInterface& destination) const {
-    MetalArray* metalDestination = dynamic_cast<MetalArray*>(&destination);
+    ArrayInterface* unwrappedDestination = &destination;
+    ComputeArray* wrapper = dynamic_cast<ComputeArray*>(&destination);
+    if (wrapper != NULL)
+        unwrappedDestination = &wrapper->getArray();
+    MetalArray* metalDestination = dynamic_cast<MetalArray*>(unwrappedDestination);
     if (metalDestination == NULL)
         throw OpenMMException("Cannot copy Metal array "+impl->name+" to a non-Metal array");
     if (metalDestination->getSize() != impl->size || metalDestination->getElementSize() != impl->elementSize)
