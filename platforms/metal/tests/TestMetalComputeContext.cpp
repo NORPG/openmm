@@ -6,6 +6,7 @@
 #include "openmm/internal/AssertionUtilities.h"
 #include "openmm/internal/ThreadPool.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -108,6 +109,17 @@ kernel void loadFixedPointPlanes(device const uint2* input [[buffer(0)]],
                                  uint index [[thread_position_in_grid]]) {
     if (index == 0u)
         output[0] = float4(loadFixedPoint3(input, atom, paddedNumAtoms), 0.0f);
+}
+
+kernel void addFixedPointLowWordAtomically(
+        device atomic_uint* words [[buffer(0)]],
+        device uint* previousLowWords [[buffer(1)]],
+        constant uint& logicalIndex [[buffer(2)]],
+        constant uint& addend [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    threadgroup_barrier(mem_flags::mem_none);
+    previousLowWords[index] = atomicAddFixedPointLowWord(words, logicalIndex,
+                                                         addend);
 }
 )MSL";
     ComputeProgram program = context.compileProgram(source);
@@ -220,6 +232,54 @@ kernel void loadFixedPointPlanes(device const uint2* input [[buffer(0)]],
     ArrayInterface& longForces = context.getLongForceBuffer();
     const uint32_t paddedNumAtoms = static_cast<uint32_t>(context.getPaddedNumAtoms());
     const uint32_t atom = 17;
+
+    const uint32_t atomicThreadCount = 32768;
+    const uint32_t atomicIndex = static_cast<uint32_t>(longForces.getSize()-1);
+    const uint32_t initialLowWord = 0xff000001u;
+    const uint32_t lowWordAddend = 0x00010001u;
+    const uint32_t highWordSentinel = 0x5a5aa5a5u;
+    const MetalFixedPoint64Storage untouchedSentinel = {0x13579bdfu, 0x2468ace0u};
+    vector<MetalFixedPoint64Storage> atomicValues(longForces.getSize(),
+                                                  untouchedSentinel);
+    atomicValues[atomicIndex] = {initialLowWord, highWordSentinel};
+    longForces.upload(atomicValues);
+
+    ComputeArray previousLowWords;
+    previousLowWords.initialize<uint32_t>(context, atomicThreadCount,
+                                          "atomic low-word return values");
+    ComputeKernel addLowWord = program->createKernel("addFixedPointLowWordAtomically");
+    addLowWord->addArg(longForces);
+    addLowWord->addArg(previousLowWords);
+    addLowWord->addArg(atomicIndex);
+    addLowWord->addArg(lowWordAddend);
+    addLowWord->execute(atomicThreadCount, min(256, addLowWord->getMaxBlockSize()));
+
+    vector<uint32_t> actualPreviousLowWords;
+    previousLowWords.download(actualPreviousLowWords);
+    vector<uint32_t> expectedPreviousLowWords(atomicThreadCount);
+    uint32_t expectedFinalLowWord = initialLowWord;
+    for (uint32_t i = 0; i < atomicThreadCount; i++) {
+        expectedPreviousLowWords[i] = expectedFinalLowWord;
+        expectedFinalLowWord += lowWordAddend;
+    }
+    sort(actualPreviousLowWords.begin(), actualPreviousLowWords.end());
+    sort(expectedPreviousLowWords.begin(), expectedPreviousLowWords.end());
+    for (uint32_t i = 0; i < atomicThreadCount; i++)
+        ASSERT_EQUAL(expectedPreviousLowWords[i], actualPreviousLowWords[i]);
+
+    vector<MetalFixedPoint64Storage> atomicResults;
+    longForces.download(atomicResults);
+    for (size_t i = 0; i < atomicResults.size(); i++) {
+        if (i == atomicIndex) {
+            ASSERT_EQUAL(expectedFinalLowWord, atomicResults[i].lo);
+            ASSERT_EQUAL(highWordSentinel, atomicResults[i].hi);
+        }
+        else {
+            ASSERT_EQUAL(untouchedSentinel.lo, atomicResults[i].lo);
+            ASSERT_EQUAL(untouchedSentinel.hi, atomicResults[i].hi);
+        }
+    }
+
     vector<MetalFixedPoint64Storage> planeValues(longForces.getSize(), {0u, 0u});
     planeValues[atom] = {0x40000000u, 0x00000001u};
     planeValues[atom+paddedNumAtoms] = {0x80000000u, 0xfffffffeu};

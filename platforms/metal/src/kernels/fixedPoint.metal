@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include <metal_atomic>
 using namespace metal;
 
 /*
@@ -39,6 +40,19 @@ inline uint2 negateFixedPoint(uint2 value) {
 /** Load one raw logical Q32.32 value from the host-compatible uint2 ABI. */
 inline uint2 loadFixedPoint(device const uint2* values, uint index) {
     return values[index];
+}
+
+/**
+ * Atomically add to the low word of one logical Q32.32 value.
+ *
+ * The return value is the low word before this atomic read-modify-write, so a
+ * later stage can calculate carry.  This helper deliberately neither computes
+ * carry nor accesses the high word.
+ */
+inline uint atomicAddFixedPointLowWord(device atomic_uint* words,
+                                       uint logicalIndex, uint addend) {
+    return atomic_fetch_add_explicit(&words[2u*logicalIndex], addend,
+                                     memory_order_relaxed);
 }
 
 /**
