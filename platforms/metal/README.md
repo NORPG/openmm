@@ -5,13 +5,13 @@ Objective-C++, confined to private implementation files; installed headers and
 the OpenMM integration remain ordinary C++11.  It uses Apple's public Metal API
 directly and does not use Metal-cpp, OpenCL, or `cl2Metal`.
 
-Hand-written MSL lives only in standalone `src/kernels/*.metal` files.  When
-Xcode's optional Metal Toolchain is available, the build compiles those files
-offline and embeds one metallib in both shared and static plugins.  Otherwise,
-OpenMM's kernel-source encoder embeds the MSL for compilation through the Metal
-API at runtime.  Both paths produce self-contained plugins and never read the
-source tree at runtime.  Runtime MSL compilation also remains available through
-`MetalProgram` for future generated kernels.
+Hand-written MSL lives only in standalone `src/kernels/*.metal` files.  The
+build always encodes those sources into the plugin for runtime-generated
+kernels.  When Xcode's optional Metal Toolchain is available, it also compiles
+them offline and embeds one metallib in both shared and static plugins.  Both
+paths produce self-contained plugins and never read the source tree at runtime.
+Runtime MSL compilation also remains available through `MetalProgram` for
+future generated kernels.
 
 `MetalContext` implements OpenMM's `ComputeContext` interface for the core
 single-device runtime surface: queues, arrays, events, runtime MSL programs,
@@ -45,6 +45,21 @@ The byte offset of a logical component is therefore
 it to zero, exposes it through `getLongForceBuffer()`, and registers it for
 automatic clearing at the start of every force evaluation.  The context's
 pinned transfer storage is sized to include the complete long force buffer.
+
+`src/kernels/fixedPoint.metal` defines the Metal 3.0 helper contract used by
+runtime-generated kernels.  `MetalContext::compileProgram()` prepends this
+source automatically.  `realToFixedPoint()` implements
+`trunc(value*2^32)` for finite binary32 values in `[-2^31, 2^31)`, returning
+the two's-complement result as `uint2(lo, hi)`.  `splitFixedPoint()` exposes the
+same word assembly operation for already-decomposed values.  `loadFixedPoint()`
+loads the raw words, while `reconstructSignedFixedPoint()` and
+`loadSignedFixedPoint()` convert a signed Q32.32 value back to binary32.
+`loadFixedPoint3()` applies the component-plane indexing described above.
+
+Signed reconstruction performs one round-to-nearest, ties-to-even operation on
+the complete two-word magnitude.  Kernels must not reconstruct a negative value
+by separately converting and adding its signed high word and unsigned low word:
+that loses small negative fractions and can double-round larger values.
 
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,

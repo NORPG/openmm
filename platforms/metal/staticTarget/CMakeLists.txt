@@ -1,21 +1,19 @@
+set_source_files_properties(${METAL_KERNELS_CPP} ${METAL_KERNELS_H}
+    PROPERTIES GENERATED TRUE)
 if(OPENMM_METAL_USE_EMBEDDED_METALLIB)
     # Source properties are directory scoped.  Repeat the dependency so an
     # incremental .metal edit forces the .incbin object to be reassembled.
     set_source_files_properties("${OPENMM_METAL_EMBEDDED_ASM}" PROPERTIES
         GENERATED TRUE
         OBJECT_DEPENDS "${OPENMM_METAL_METALLIB}")
-else()
-    set_source_files_properties(${METAL_KERNELS_CPP} ${METAL_KERNELS_H}
-        PROPERTIES GENERATED TRUE)
 endif()
 add_library(${STATIC_TARGET} STATIC
     ${SOURCE_FILES}
     ${SOURCE_INCLUDE_FILES}
     ${API_ABS_INCLUDE_FILES})
+add_dependencies(${STATIC_TARGET} GenerateMetalKernelSources)
 if(OPENMM_METAL_USE_EMBEDDED_METALLIB)
     add_dependencies(${STATIC_TARGET} OpenMMMetalKernelLibrary)
-else()
-    add_dependencies(${STATIC_TARGET} GenerateMetalKernelSources)
 endif()
 
 target_link_libraries(${STATIC_TARGET}
