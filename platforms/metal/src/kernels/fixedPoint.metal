@@ -56,6 +56,16 @@ inline uint atomicAddFixedPointLowWord(device atomic_uint* words,
 }
 
 /**
+ * Return the carry-out bit from a modulo-2^32 low-word addition.
+ * previousLowWord must be the value returned by the low-word atomic add.
+ */
+inline uint computeFixedPointCarry(uint previousLowWord,
+                                   uint lowWordAddend) {
+    const uint updatedLowWord = previousLowWord+lowWordAddend;
+    return uint(updatedLowWord < previousLowWord);
+}
+
+/**
  * Round an unsigned Q32.32 magnitude to binary32 without double rounding.
  * magnitude must not exceed 2^63.
  */
