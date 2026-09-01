@@ -66,6 +66,19 @@ inline uint computeFixedPointCarry(uint previousLowWord,
 }
 
 /**
+ * Atomically add the high limb and low-word carry to one logical Q32.32 value.
+ * carry must be the 0-or-1 result of computeFixedPointCarry().
+ */
+inline void atomicAddFixedPointHighWord(device atomic_uint* words,
+                                        uint logicalIndex,
+                                        uint highWordAddend, uint carry) {
+    const uint addend = highWordAddend+carry;
+    if (addend != 0u)
+        atomic_fetch_add_explicit(&words[2u*logicalIndex+1u], addend,
+                                  memory_order_relaxed);
+}
+
+/**
  * Round an unsigned Q32.32 magnitude to binary32 without double rounding.
  * magnitude must not exceed 2^63.
  */

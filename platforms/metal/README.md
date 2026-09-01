@@ -66,15 +66,18 @@ that loses small negative fractions and can double-round larger values.
 `memory_order_relaxed` on word `2*i`.  It returns the previous low word for a
 later carry calculation.  `computeFixedPointCarry()` compares the modulo-2^32
 low-word result with that previous value and returns the carry-out as `0u` or
-`1u`.  Both helpers use only 32-bit operations and neither accesses the high
-word.
+`1u`.  `atomicAddFixedPointHighWord()` adds the high-word addend plus that carry
+to word `2*i+1` with another relaxed 32-bit atomic operation, skipping the RMW
+when the combined addend is zero.  Together these helpers implement modulo-2^64
+addition using only 32-bit operations.  The two word updates do not form a
+linearizable 64-bit atomic operation.
 
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components
 through a `uint2` view.  Read-only `uint2` access is permitted only after all
-atomic writers have completed.  High-word atomic add and routing Common force
-producers into this buffer remain separate work.
+atomic writers have completed.  Routing Common force producers into this
+buffer remains separate work.
 
 ## Current support boundary
 

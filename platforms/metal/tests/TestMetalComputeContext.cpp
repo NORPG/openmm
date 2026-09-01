@@ -139,18 +139,21 @@ kernel void computeFixedPointCarries(
                                                 lowWordAddends[index]);
 }
 
-kernel void addFixedPointLowWordAtomically(
+kernel void addFixedPointWordsAtomically(
         device atomic_uint* words [[buffer(0)]],
         device uint* previousLowWords [[buffer(1)]],
         device uint* carries [[buffer(2)]],
         constant uint& logicalIndex [[buffer(3)]],
-        constant uint& addend [[buffer(4)]],
+        constant uint& lowWordAddend [[buffer(4)]],
+        constant uint& highWordAddend [[buffer(5)]],
         uint index [[thread_position_in_grid]]) {
     threadgroup_barrier(mem_flags::mem_none);
     const uint previousLowWord = atomicAddFixedPointLowWord(words, logicalIndex,
-                                                            addend);
+                                                            lowWordAddend);
+    const uint carry = computeFixedPointCarry(previousLowWord, lowWordAddend);
+    atomicAddFixedPointHighWord(words, logicalIndex, highWordAddend, carry);
     previousLowWords[index] = previousLowWord;
-    carries[index] = computeFixedPointCarry(previousLowWord, addend);
+    carries[index] = carry;
 }
 )MSL";
     ComputeProgram program = context.compileProgram(source);
@@ -294,14 +297,15 @@ kernel void addFixedPointLowWordAtomically(
     const uint32_t atom = 17;
 
     const uint32_t atomicThreadCount = 32768;
-    const uint32_t atomicIndex = static_cast<uint32_t>(longForces.getSize()-1);
+    const uint32_t atomicIndex = paddedNumAtoms+atom;
     const uint32_t initialLowWord = 0xff000001u;
     const uint32_t lowWordAddend = 0x00010001u;
-    const uint32_t highWordSentinel = 0x5a5aa5a5u;
+    const uint32_t initialHighWord = 0x00001000u;
+    const uint32_t highWordAddend = 0xffffffffu;
     const MetalFixedPoint64Storage untouchedSentinel = {0x13579bdfu, 0x2468ace0u};
     vector<MetalFixedPoint64Storage> atomicValues(longForces.getSize(),
                                                   untouchedSentinel);
-    atomicValues[atomicIndex] = {initialLowWord, highWordSentinel};
+    atomicValues[atomicIndex] = {initialLowWord, initialHighWord};
     longForces.upload(atomicValues);
 
     ComputeArray previousLowWords;
@@ -310,13 +314,14 @@ kernel void addFixedPointLowWordAtomically(
                                           "atomic low-word return values");
     atomicCarries.initialize<uint32_t>(context, atomicThreadCount,
                                        "atomic low-word carries");
-    ComputeKernel addLowWord = program->createKernel("addFixedPointLowWordAtomically");
-    addLowWord->addArg(longForces);
-    addLowWord->addArg(previousLowWords);
-    addLowWord->addArg(atomicCarries);
-    addLowWord->addArg(atomicIndex);
-    addLowWord->addArg(lowWordAddend);
-    addLowWord->execute(atomicThreadCount, min(256, addLowWord->getMaxBlockSize()));
+    ComputeKernel addWords = program->createKernel("addFixedPointWordsAtomically");
+    addWords->addArg(longForces);
+    addWords->addArg(previousLowWords);
+    addWords->addArg(atomicCarries);
+    addWords->addArg(atomicIndex);
+    addWords->addArg(lowWordAddend);
+    addWords->addArg(highWordAddend);
+    addWords->execute(atomicThreadCount, min(256, addWords->getMaxBlockSize()));
 
     vector<uint32_t> actualPreviousLowWords;
     vector<uint32_t> actualCarries;
@@ -340,6 +345,15 @@ kernel void addFixedPointLowWordAtomically(
     }
     ASSERT_EQUAL(expectedCarryCount, actualCarryCount);
     ASSERT_EQUAL(1, actualCarryCount);
+    const uint64_t initialValue = (static_cast<uint64_t>(initialHighWord) << 32) |
+                                  initialLowWord;
+    const uint64_t addendValue = (static_cast<uint64_t>(highWordAddend) << 32) |
+                                 lowWordAddend;
+    const uint64_t expectedFinalValue = initialValue+
+            static_cast<uint64_t>(atomicThreadCount)*addendValue;
+    ASSERT_EQUAL(static_cast<uint32_t>(expectedFinalValue), expectedFinalLowWord);
+    const uint32_t expectedFinalHighWord = static_cast<uint32_t>(expectedFinalValue >> 32);
+    ASSERT_EQUAL(0xffff9001u, expectedFinalHighWord);
     sort(actualPreviousLowWords.begin(), actualPreviousLowWords.end());
     sort(expectedPreviousLowWords.begin(), expectedPreviousLowWords.end());
     for (uint32_t i = 0; i < atomicThreadCount; i++)
@@ -350,7 +364,7 @@ kernel void addFixedPointLowWordAtomically(
     for (size_t i = 0; i < atomicResults.size(); i++) {
         if (i == atomicIndex) {
             ASSERT_EQUAL(expectedFinalLowWord, atomicResults[i].lo);
-            ASSERT_EQUAL(highWordSentinel, atomicResults[i].hi);
+            ASSERT_EQUAL(expectedFinalHighWord, atomicResults[i].hi);
         }
         else {
             ASSERT_EQUAL(untouchedSentinel.lo, atomicResults[i].lo);
