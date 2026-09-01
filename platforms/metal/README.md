@@ -72,6 +72,15 @@ when the combined addend is zero.  Together these helpers implement modulo-2^64
 addition using only 32-bit operations.  The two word updates do not form a
 linearizable 64-bit atomic operation.
 
+`atomicAddFixedPointNative64()` is an additional experimental implementation
+that lowers `__sync_fetch_and_add()` on a `device ulong*` to one native i64
+atomic read-modify-write.  It is not selected by default: the public MSL atomic
+API does not expose 64-bit fetch-add, and current compiler backends do not
+consistently accept the resulting pipeline even on Apple9 hardware.  Callers
+must gate it on Apple9 or newer and successfully compile and create the exact
+pipeline before dispatch.  `getSupports64BitGlobalAtomics()` therefore remains
+false, and the 32-bit two-word implementation remains the portable path.
+
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components
@@ -118,8 +127,9 @@ compilation is controlled by `OPENMM_METAL_KERNEL_COMPILATION`:
 The focused test targets are:
 
 - `TestMetalComputeContext`: the minimal `ComputeContext` contract, standard
-  state-buffer ABI, `ComputeArray` interoperability, events, and runtime MSL
-  compilation through the generic compute interfaces
+  state-buffer ABI, `ComputeArray` interoperability, events, runtime MSL
+  compilation through the generic compute interfaces, and an Apple9-gated
+  compile/pipeline/dispatch probe for the experimental native 64-bit atomic add
 - `TestMetalPlatform`: plugin registration, device properties, and the required
   OpenMM kernel-factory surface
 - `TestMetalRuntime`: buffers, transfers, queues, events, runtime MSL

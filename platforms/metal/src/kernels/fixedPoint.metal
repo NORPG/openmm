@@ -79,6 +79,24 @@ inline void atomicAddFixedPointHighWord(device atomic_uint* words,
 }
 
 /**
+ * Experimentally perform one native modulo-2^64 atomic add.
+ *
+ * The public MSL atomic API does not currently expose fetch-add for
+ * atomic_ulong.  Apple's Metal Clang frontend nevertheless accepts this
+ * integer atomic builtin and lowers it to one device-address-space i64
+ * atomicrmw.  A kernel must only call this helper after an Apple9-or-newer
+ * capability check and a successful pipeline probe.  The buffer must have the
+ * logical 8-byte element layout documented by MetalFixedPoint64Storage, and no
+ * uint2 or atomic_uint accesses may overlap this operation.
+ *
+ * This helper is intentionally not selected by the portable two-word path.
+ */
+inline ulong atomicAddFixedPointNative64(device ulong* values,
+                                         uint logicalIndex, ulong addend) {
+    return __sync_fetch_and_add(&values[logicalIndex], addend);
+}
+
+/**
  * Round an unsigned Q32.32 magnitude to binary32 without double rounding.
  * magnitude must not exceed 2^63.
  */

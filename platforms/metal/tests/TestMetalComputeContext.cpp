@@ -39,6 +39,81 @@ float reconstructFixedPointOnHost(const MetalFixedPoint64Storage& value) {
     return negative ? -converted : converted;
 }
 
+void testNative64BitAtomicAdd(MetalContext& context) {
+    const MetalDeviceCaps& caps = context.getQueue().getDeviceCaps();
+    if (caps.getHighestAppleGpuFamily() < 9) {
+        cout << "Native 64-bit atomic add validation skipped: Apple9 or newer is required" << endl;
+        return;
+    }
+
+    // Keep this in a separate program.  The compiler intrinsic is deliberately
+    // experimental, so failure to compile it or build its pipeline must not
+    // disable the portable 32-bit two-word implementation.
+    const string source = R"MSL(
+kernel void addFixedPointNative64Atomically(
+        device ulong* values [[buffer(0)]],
+        device ulong* previousValues [[buffer(1)]],
+        constant uint& logicalIndex [[buffer(2)]],
+        constant ulong& addend [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    previousValues[index] = atomicAddFixedPointNative64(values, logicalIndex,
+                                                         addend);
+}
+)MSL";
+    ComputeProgram program;
+    ComputeKernel addNative;
+    try {
+        program = context.compileProgram(source);
+        addNative = program->createKernel("addFixedPointNative64Atomically");
+    }
+    catch (const OpenMMException&) {
+        cout << "Native 64-bit atomic add validation skipped on " << caps.getName()
+             << ": the local Metal compiler could not build the experimental pipeline"
+             << endl;
+        return;
+    }
+
+    const uint32_t threadCount = 32768;
+    const uint32_t logicalIndex = 1;
+    const uint64_t initialValue = UINT64_C(0xfedcba98fff00001);
+    const uint64_t addend = UINT64_C(0x0000000100010001);
+    const uint64_t sentinel0 = UINT64_C(0x0123456789abcdef);
+    const uint64_t sentinel2 = UINT64_C(0x76543210fedcba98);
+
+    ComputeArray values;
+    ComputeArray previousValues;
+    values.initialize<uint64_t>(context, 3, "native 64-bit atomic values");
+    previousValues.initialize<uint64_t>(context, threadCount,
+                                        "native 64-bit atomic return values");
+    values.upload(vector<uint64_t>({sentinel0, initialValue, sentinel2}));
+
+    addNative->addArg(values);
+    addNative->addArg(previousValues);
+    addNative->addArg(logicalIndex);
+    addNative->addArg(addend);
+    addNative->execute(threadCount, min(256, addNative->getMaxBlockSize()));
+
+    vector<uint64_t> actualPreviousValues;
+    vector<uint64_t> finalValues;
+    previousValues.download(actualPreviousValues);
+    values.download(finalValues);
+
+    vector<uint64_t> expectedPreviousValues(threadCount);
+    uint64_t expectedFinalValue = initialValue;
+    for (uint32_t i = 0; i < threadCount; i++) {
+        expectedPreviousValues[i] = expectedFinalValue;
+        expectedFinalValue += addend;
+    }
+    sort(actualPreviousValues.begin(), actualPreviousValues.end());
+    sort(expectedPreviousValues.begin(), expectedPreviousValues.end());
+    for (uint32_t i = 0; i < threadCount; i++)
+        ASSERT_EQUAL(expectedPreviousValues[i], actualPreviousValues[i]);
+    ASSERT_EQUAL(sentinel0, finalValues[0]);
+    ASSERT_EQUAL(expectedFinalValue, finalValues[logicalIndex]);
+    ASSERT_EQUAL(sentinel2, finalValues[2]);
+    cout << "Native 64-bit atomic add validated on " << caps.getName() << endl;
+}
+
 void testFixedPointHelpers(MetalContext& context) {
     struct ConversionCase {
         float input;
@@ -447,6 +522,7 @@ void testLongForceBuffer() {
         ASSERT_EQUAL(0u, value.hi);
     }
     testFixedPointHelpers(context);
+    testNative64BitAtomicAdd(context);
 }
 
 void testCoreContextSurface() {
