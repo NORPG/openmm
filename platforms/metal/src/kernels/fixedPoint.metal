@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include <metal_atomic>
 using namespace metal;
 
 /*
@@ -39,6 +40,57 @@ inline uint2 negateFixedPoint(uint2 value) {
 /** Load one raw logical Q32.32 value from the host-compatible uint2 ABI. */
 inline uint2 loadFixedPoint(device const uint2* values, uint index) {
     return values[index];
+}
+
+/**
+ * Atomically add to the low word of one logical Q32.32 value.
+ *
+ * The return value is the low word before this atomic read-modify-write, so a
+ * later stage can calculate carry.  This helper deliberately neither computes
+ * carry nor accesses the high word.
+ */
+inline uint atomicAddFixedPointLowWord(device atomic_uint* words,
+                                       uint logicalIndex, uint addend) {
+    return atomic_fetch_add_explicit(&words[2u*logicalIndex], addend,
+                                     memory_order_relaxed);
+}
+
+/**
+ * Return the carry-out bit from a modulo-2^32 low-word addition.
+ * previousLowWord must be the value returned by the low-word atomic add.
+ */
+inline uint computeFixedPointCarry(uint previousLowWord,
+                                   uint lowWordAddend) {
+    const uint updatedLowWord = previousLowWord+lowWordAddend;
+    return uint(updatedLowWord < previousLowWord);
+}
+
+/**
+ * Atomically add the high limb and low-word carry to one logical Q32.32 value.
+ * carry must be the 0-or-1 result of computeFixedPointCarry().
+ */
+inline void atomicAddFixedPointHighWord(device atomic_uint* words,
+                                        uint logicalIndex,
+                                        uint highWordAddend, uint carry) {
+    const uint addend = highWordAddend+carry;
+    if (addend != 0u)
+        atomic_fetch_add_explicit(&words[2u*logicalIndex+1u], addend,
+                                  memory_order_relaxed);
+}
+
+/**
+ * Atomically accumulate one complete logical Q32.32 addend.
+ *
+ * This intentionally returns no previous value: the two 32-bit limb updates
+ * are not one linearizable 64-bit operation.  Call atomicFetchAddCounter32()
+ * instead when an ordinary 32-bit counter needs the value before its update.
+ */
+inline void atomicAddFixedPoint(device atomic_uint* words,
+                                uint logicalIndex, uint2 addend) {
+    const uint previousLowWord = atomicAddFixedPointLowWord(
+            words, logicalIndex, addend.x);
+    const uint carry = computeFixedPointCarry(previousLowWord, addend.x);
+    atomicAddFixedPointHighWord(words, logicalIndex, addend.y, carry);
 }
 
 /**
