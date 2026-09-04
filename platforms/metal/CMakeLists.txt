@@ -124,10 +124,10 @@ set(METAL_COMMON_CONTEXT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/src/ComputeForceInfo.cpp)
 list(APPEND SOURCE_FILES ${METAL_COMMON_CONTEXT_SOURCES})
 
-# Keep hand-written MSL in standalone .metal files.  With the full Xcode Metal
-# toolchain they are compiled offline and embedded as one metallib.  Otherwise
-# they are encoded into C++ and compiled at runtime.  Both products are fully
-# self-contained and never depend on locating the source tree at runtime.
+# Keep hand-written MSL in standalone .metal files.  Encode them into C++ for
+# generic runtime compilation in every build.  With the full Xcode Metal
+# toolchain they are also compiled offline and embedded as one metallib.  Both
+# paths remain self-contained and never read the source tree at runtime.
 set(METAL_KERNEL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 file(GLOB METAL_KERNEL_FILES CONFIGURE_DEPENDS
     "${METAL_KERNEL_SOURCE_DIR}/kernels/*.metal")
@@ -173,33 +173,33 @@ if(OPENMM_METAL_USE_EMBEDDED_METALLIB)
         GENERATED TRUE
         OBJECT_DEPENDS "${OPENMM_METAL_METALLIB}")
     list(APPEND SOURCE_FILES "${OPENMM_METAL_EMBEDDED_ASM}")
-else()
-    set(METAL_KERNEL_SOURCE_CLASS MetalKernelSources)
-    set(METAL_KERNELS_CPP "${CMAKE_CURRENT_BINARY_DIR}/src/${METAL_KERNEL_SOURCE_CLASS}.cpp")
-    set(METAL_KERNELS_H "${CMAKE_CURRENT_BINARY_DIR}/src/${METAL_KERNEL_SOURCE_CLASS}.h")
-    add_custom_command(
-        OUTPUT "${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}"
-        COMMAND "${CMAKE_COMMAND}"
-            "-DKERNEL_SOURCE_DIR=${METAL_KERNEL_SOURCE_DIR}"
-            "-DKERNELS_CPP=${METAL_KERNELS_CPP}"
-            "-DKERNELS_H=${METAL_KERNELS_H}"
-            "-DKERNEL_SOURCE_CLASS=${METAL_KERNEL_SOURCE_CLASS}"
-            -DKERNEL_FILE_EXTENSION=metal
-            -P "${CMAKE_SOURCE_DIR}/cmake_modules/EncodeKernelFiles.cmake"
-        DEPENDS
-            ${METAL_KERNEL_FILES}
-            "${METAL_KERNEL_SOURCE_DIR}/${METAL_KERNEL_SOURCE_CLASS}.cpp.in"
-            "${METAL_KERNEL_SOURCE_DIR}/${METAL_KERNEL_SOURCE_CLASS}.h.in"
-            "${CMAKE_SOURCE_DIR}/cmake_modules/EncodeKernelFiles.cmake"
-        VERBATIM)
-    set_source_files_properties("${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}"
-        PROPERTIES GENERATED TRUE)
-    add_custom_target(GenerateMetalKernelSources
-        DEPENDS "${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}")
-    list(APPEND SOURCE_FILES "${METAL_KERNELS_CPP}")
-    list(APPEND SOURCE_INCLUDE_FILES "${METAL_KERNELS_H}")
-    include_directories(BEFORE "${CMAKE_CURRENT_BINARY_DIR}/src")
 endif()
+
+set(METAL_KERNEL_SOURCE_CLASS MetalKernelSources)
+set(METAL_KERNELS_CPP "${CMAKE_CURRENT_BINARY_DIR}/src/${METAL_KERNEL_SOURCE_CLASS}.cpp")
+set(METAL_KERNELS_H "${CMAKE_CURRENT_BINARY_DIR}/src/${METAL_KERNEL_SOURCE_CLASS}.h")
+add_custom_command(
+    OUTPUT "${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DKERNEL_SOURCE_DIR=${METAL_KERNEL_SOURCE_DIR}"
+        "-DKERNELS_CPP=${METAL_KERNELS_CPP}"
+        "-DKERNELS_H=${METAL_KERNELS_H}"
+        "-DKERNEL_SOURCE_CLASS=${METAL_KERNEL_SOURCE_CLASS}"
+        -DKERNEL_FILE_EXTENSION=metal
+        -P "${CMAKE_SOURCE_DIR}/cmake_modules/EncodeKernelFiles.cmake"
+    DEPENDS
+        ${METAL_KERNEL_FILES}
+        "${METAL_KERNEL_SOURCE_DIR}/${METAL_KERNEL_SOURCE_CLASS}.cpp.in"
+        "${METAL_KERNEL_SOURCE_DIR}/${METAL_KERNEL_SOURCE_CLASS}.h.in"
+        "${CMAKE_SOURCE_DIR}/cmake_modules/EncodeKernelFiles.cmake"
+    VERBATIM)
+set_source_files_properties("${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}"
+    PROPERTIES GENERATED TRUE)
+add_custom_target(GenerateMetalKernelSources
+    DEPENDS "${METAL_KERNELS_CPP}" "${METAL_KERNELS_H}")
+list(APPEND SOURCE_FILES "${METAL_KERNELS_CPP}")
+list(APPEND SOURCE_INCLUDE_FILES "${METAL_KERNELS_H}")
+include_directories(BEFORE "${CMAKE_CURRENT_BINARY_DIR}/src")
 
 file(GLOB CORE_HEADERS include/*.h)
 install(FILES ${CORE_HEADERS} DESTINATION include/openmm/metal)

@@ -5,13 +5,13 @@ Objective-C++, confined to private implementation files; installed headers and
 the OpenMM integration remain ordinary C++11.  It uses Apple's public Metal API
 directly and does not use Metal-cpp, OpenCL, or `cl2Metal`.
 
-Hand-written MSL lives only in standalone `src/kernels/*.metal` files.  When
-Xcode's optional Metal Toolchain is available, the build compiles those files
-offline and embeds one metallib in both shared and static plugins.  Otherwise,
-OpenMM's kernel-source encoder embeds the MSL for compilation through the Metal
-API at runtime.  Both paths produce self-contained plugins and never read the
-source tree at runtime.  Runtime MSL compilation also remains available through
-`MetalProgram` for future generated kernels.
+Hand-written MSL lives only in standalone `src/kernels/*.metal` files.  The
+build always encodes those sources into the plugin for runtime-generated
+kernels.  When Xcode's optional Metal Toolchain is available, it also compiles
+them offline and embeds one metallib in both shared and static plugins.  Both
+paths produce self-contained plugins and never read the source tree at runtime.
+Runtime MSL compilation also remains available through `MetalProgram` for
+future generated kernels.
 
 `MetalContext` implements OpenMM's `ComputeContext` interface for the core
 single-device runtime surface: queues, arrays, events, runtime MSL programs,
