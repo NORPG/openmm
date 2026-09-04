@@ -53,7 +53,7 @@ id<MTLBuffer> createStagingBuffer(const shared_ptr<MetalQueueState>& queue, size
 
 struct MetalArray::Impl {
     shared_ptr<MetalQueueState> queue;
-    id<MTLBuffer> buffer = nil;
+    shared_ptr<MetalBufferState> bufferState;
     ComputeContext* context = NULL;
     size_t size = 0;
     int elementSize = 0;
@@ -93,7 +93,8 @@ void MetalArray::initializeImpl(ComputeContext* context, MetalQueue& queue, size
         size_t bytes = checkedByteCount(size, elementSize, "MetalArray initialization");
         queue.state->checkForErrors();
         impl->queue = queue.state;
-        impl->buffer = createPrivateBuffer(impl->queue, bytes, name);
+        impl->bufferState = make_shared<MetalBufferState>(
+                impl->queue, createPrivateBuffer(impl->queue, bytes, name));
         impl->context = context;
         impl->size = size;
         impl->elementSize = elementSize;
@@ -107,14 +108,15 @@ void MetalArray::resize(size_t size) {
             throw OpenMMException("MetalArray has not been initialized");
         size_t bytes = checkedByteCount(size, impl->elementSize, "MetalArray resize");
         impl->queue->checkForErrors();
+        lock_guard<mutex> lock(impl->queue->submissionMutex);
         id<MTLBuffer> replacement = createPrivateBuffer(impl->queue, bytes, impl->name);
-        impl->buffer = replacement;
+        impl->bufferState->setBuffer(replacement);
         impl->size = size;
     }
 }
 
 bool MetalArray::isInitialized() const {
-    return impl->queue != NULL && impl->buffer != nil;
+    return impl->queue != NULL && impl->bufferState != NULL && impl->bufferState->getBuffer() != nil;
 }
 
 size_t MetalArray::getSize() const {
@@ -154,13 +156,14 @@ void MetalArray::uploadSubArray(const void* data, int offset, int elements, bool
         memcpy(staging.contents, data, bytes);
 
         lock_guard<mutex> lock(impl->queue->submissionMutex);
+        id<MTLBuffer> buffer = impl->bufferState->getBuffer();
         id<MTLCommandBuffer> command = impl->queue->makeCommandBuffer("upload "+impl->name);
         id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
         if (encoder == nil)
             throw OpenMMException("Metal failed to create a blit encoder for uploading "+impl->name);
         [encoder copyFromBuffer:staging
                   sourceOffset:0
-                      toBuffer:impl->buffer
+                      toBuffer:buffer
              destinationOffset:static_cast<NSUInteger>(offset)*impl->elementSize
                           size:bytes];
         [encoder endEncoding];
@@ -186,11 +189,12 @@ void MetalArray::downloadSubArray(void* data, int offset, int elements, bool blo
         id<MTLBuffer> staging = createStagingBuffer(impl->queue, bytes, "downloading "+impl->name);
 
         lock_guard<mutex> lock(impl->queue->submissionMutex);
+        id<MTLBuffer> buffer = impl->bufferState->getBuffer();
         id<MTLCommandBuffer> command = impl->queue->makeCommandBuffer("download "+impl->name);
         id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
         if (encoder == nil)
             throw OpenMMException("Metal failed to create a blit encoder for downloading "+impl->name);
-        [encoder copyFromBuffer:impl->buffer
+        [encoder copyFromBuffer:buffer
                   sourceOffset:static_cast<NSUInteger>(offset)*impl->elementSize
                       toBuffer:staging
              destinationOffset:0
@@ -228,13 +232,15 @@ void MetalArray::copySubArrayTo(MetalArray& destination, int sourceOffset, int d
         impl->queue->checkForErrors();
 
         lock_guard<mutex> lock(impl->queue->submissionMutex);
+        id<MTLBuffer> source = impl->bufferState->getBuffer();
+        id<MTLBuffer> target = destination.impl->bufferState->getBuffer();
         id<MTLCommandBuffer> command = impl->queue->makeCommandBuffer("copy "+impl->name+" to "+destination.impl->name);
         id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
         if (encoder == nil)
             throw OpenMMException("Metal failed to create a blit encoder for array copy");
-        [encoder copyFromBuffer:impl->buffer
+        [encoder copyFromBuffer:source
                   sourceOffset:static_cast<NSUInteger>(sourceOffset)*impl->elementSize
-                      toBuffer:destination.impl->buffer
+                      toBuffer:target
              destinationOffset:static_cast<NSUInteger>(destinationOffset)*impl->elementSize
                           size:bytes];
         [encoder endEncoding];
@@ -246,6 +252,6 @@ shared_ptr<MetalQueueState> MetalArrayAccess::getQueueState(const MetalArray& ar
     return array.impl->queue;
 }
 
-id<MTLBuffer> MetalArrayAccess::getBuffer(const MetalArray& array) {
-    return array.impl->buffer;
+shared_ptr<MetalBufferState> MetalArrayAccess::getBufferState(const MetalArray& array) {
+    return array.impl->bufferState;
 }

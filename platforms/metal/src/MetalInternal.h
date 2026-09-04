@@ -61,11 +61,41 @@ private:
     std::vector<std::string> asynchronousErrors;
 };
 
+/**
+ * Stable ownership identity for one resizable Metal buffer.
+ *
+ * MetalArray owns this state while it is alive.  Kernels retain the same state
+ * when the array is bound, so destroying the public C++ wrapper cannot leave a
+ * dangling kernel argument and resizing the array updates existing bindings.
+ */
+class MetalBufferState {
+public:
+    MetalBufferState(const std::shared_ptr<MetalQueueState>& queue, id<MTLBuffer> buffer) :
+            queue(queue), buffer(buffer) {
+    }
+
+    id<MTLBuffer> getBuffer() const {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        return buffer;
+    }
+
+    void setBuffer(id<MTLBuffer> replacement) {
+        std::lock_guard<std::mutex> lock(stateMutex);
+        buffer = replacement;
+    }
+
+    std::shared_ptr<MetalQueueState> queue;
+
+private:
+    mutable std::mutex stateMutex;
+    id<MTLBuffer> buffer;
+};
+
 /** Narrow private bridge used by MetalKernel without exposing Metal types. */
 class MetalArrayAccess {
 public:
     static std::shared_ptr<MetalQueueState> getQueueState(const MetalArray& array);
-    static id<MTLBuffer> getBuffer(const MetalArray& array);
+    static std::shared_ptr<MetalBufferState> getBufferState(const MetalArray& array);
 };
 
 } // namespace detail

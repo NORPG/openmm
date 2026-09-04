@@ -2,8 +2,12 @@
 #include "MetalArray.h"
 #include "MetalInternal.h"
 
+#import <dispatch/dispatch.h>
+
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <utility>
@@ -32,9 +36,97 @@ struct KernelArgument {
     };
 
     Type type = Type::Empty;
-    MetalArray* array = NULL;
+    shared_ptr<MetalBufferState> buffer;
     vector<unsigned char> primitive;
 };
+
+struct ArgumentBufferSlot {
+    enum class Kind {
+        Buffer,
+        Constant,
+        Unsupported
+    };
+
+    Kind kind = Kind::Unsupported;
+    size_t byteCount = 0;
+    MTLDataType dataType = MTLDataTypeNone;
+};
+
+/** Return the in-argument-buffer storage size for non-aggregate MSL values. */
+bool argumentConstantSize(MTLDataType type, size_t& byteCount) {
+    switch (type) {
+        case MTLDataTypeFloat:
+        case MTLDataTypeInt:
+        case MTLDataTypeUInt:
+            byteCount = 4;
+            return true;
+        case MTLDataTypeFloat2:
+        case MTLDataTypeInt2:
+        case MTLDataTypeUInt2:
+            byteCount = 8;
+            return true;
+        case MTLDataTypeFloat3:
+        case MTLDataTypeFloat4:
+        case MTLDataTypeInt3:
+        case MTLDataTypeInt4:
+        case MTLDataTypeUInt3:
+        case MTLDataTypeUInt4:
+            byteCount = 16;
+            return true;
+        case MTLDataTypeHalf:
+        case MTLDataTypeShort:
+        case MTLDataTypeUShort:
+            byteCount = 2;
+            return true;
+        case MTLDataTypeHalf2:
+        case MTLDataTypeShort2:
+        case MTLDataTypeUShort2:
+            byteCount = 4;
+            return true;
+        case MTLDataTypeHalf3:
+        case MTLDataTypeHalf4:
+        case MTLDataTypeShort3:
+        case MTLDataTypeShort4:
+        case MTLDataTypeUShort3:
+        case MTLDataTypeUShort4:
+            byteCount = 8;
+            return true;
+        case MTLDataTypeChar:
+        case MTLDataTypeUChar:
+        case MTLDataTypeBool:
+            byteCount = 1;
+            return true;
+        case MTLDataTypeChar2:
+        case MTLDataTypeUChar2:
+        case MTLDataTypeBool2:
+            byteCount = 2;
+            return true;
+        case MTLDataTypeChar3:
+        case MTLDataTypeChar4:
+        case MTLDataTypeUChar3:
+        case MTLDataTypeUChar4:
+        case MTLDataTypeBool3:
+        case MTLDataTypeBool4:
+            byteCount = 4;
+            return true;
+        case MTLDataTypeLong:
+        case MTLDataTypeULong:
+            byteCount = 8;
+            return true;
+        case MTLDataTypeLong2:
+        case MTLDataTypeULong2:
+            byteCount = 16;
+            return true;
+        case MTLDataTypeLong3:
+        case MTLDataTypeLong4:
+        case MTLDataTypeULong3:
+        case MTLDataTypeULong4:
+            byteCount = 32;
+            return true;
+        default:
+            return false;
+    }
+}
 
 } // namespace
 
@@ -46,14 +138,71 @@ struct MetalProgram::Impl {
 struct MetalKernel::Impl {
     Impl(const shared_ptr<MetalQueueState>& queue, id<MTLFunction> function,
          id<MTLComputePipelineState> pipeline, MetalBindingMode bindingMode,
-         int argumentBufferIndex) : queue(queue), function(function), pipeline(pipeline),
+         int argumentBufferIndex, MTLComputePipelineReflection* reflection) :
+         queue(queue), function(function), pipeline(pipeline),
          name(fromNSString(function.name)), bindingMode(bindingMode),
          argumentBufferIndex(argumentBufferIndex) {
         if (bindingMode == MetalBindingMode::ArgumentBuffer) {
             argumentEncoder = [function newArgumentEncoderWithBufferIndex:argumentBufferIndex];
             if (argumentEncoder == nil)
                 throw OpenMMException("Kernel "+name+" has no argument buffer at buffer index "+to_string(argumentBufferIndex));
+
+            id<MTLBufferBinding> reflectedBuffer = nil;
+            for (id<MTLBinding> binding in reflection.bindings) {
+                if (binding.index == static_cast<NSUInteger>(argumentBufferIndex) &&
+                        binding.type == MTLBindingTypeBuffer &&
+                        [binding conformsToProtocol:@protocol(MTLBufferBinding)]) {
+                    id<MTLBufferBinding> candidate = static_cast<id<MTLBufferBinding>>(binding);
+                    if (candidate.bufferPointerType.elementIsArgumentBuffer && candidate.bufferStructType != nil) {
+                        reflectedBuffer = candidate;
+                        break;
+                    }
+                }
+            }
+            if (reflectedBuffer == nil)
+                throw OpenMMException("Kernel "+name+" has no reflected argument buffer at buffer index "+
+                                      to_string(argumentBufferIndex));
+            for (MTLStructMember* member in reflectedBuffer.bufferStructType.members) {
+                ArgumentBufferSlot slot;
+                slot.dataType = member.dataType;
+                if (member.dataType == MTLDataTypePointer)
+                    slot.kind = ArgumentBufferSlot::Kind::Buffer;
+                else if (argumentConstantSize(member.dataType, slot.byteCount))
+                    slot.kind = ArgumentBufferSlot::Kind::Constant;
+                argumentBufferSlots[member.argumentIndex] = slot;
+            }
         }
+    }
+
+    void validateBufferSlot(size_t index) const {
+        if (bindingMode != MetalBindingMode::ArgumentBuffer)
+            return;
+        map<size_t, ArgumentBufferSlot>::const_iterator slot = argumentBufferSlots.find(index);
+        if (slot == argumentBufferSlots.end())
+            throw OpenMMException("Argument "+to_string(index)+
+                                  " is not present in the reflected argument buffer for kernel "+name);
+        if (slot->second.kind != ArgumentBufferSlot::Kind::Buffer)
+            throw OpenMMException("Argument "+to_string(index)+
+                                  " is not a buffer slot in the argument buffer for kernel "+name);
+    }
+
+    void validateConstantSlot(size_t index, size_t byteCount) const {
+        if (bindingMode != MetalBindingMode::ArgumentBuffer)
+            return;
+        map<size_t, ArgumentBufferSlot>::const_iterator slot = argumentBufferSlots.find(index);
+        if (slot == argumentBufferSlots.end())
+            throw OpenMMException("Argument "+to_string(index)+
+                                  " is not present in the reflected argument buffer for kernel "+name);
+        if (slot->second.kind == ArgumentBufferSlot::Kind::Buffer)
+            throw OpenMMException("Argument "+to_string(index)+
+                                  " is a buffer slot, not a constant slot, in kernel "+name);
+        if (slot->second.kind == ArgumentBufferSlot::Kind::Unsupported)
+            throw OpenMMException("Argument "+to_string(index)+" for kernel "+name+
+                                  " has unsupported reflected Metal data type "+
+                                  to_string(static_cast<unsigned long>(slot->second.dataType)));
+        if (slot->second.byteCount != byteCount)
+            throw OpenMMException("Argument "+to_string(index)+" for kernel "+name+" requires "+
+                                  to_string(slot->second.byteCount)+" bytes, not "+to_string(byteCount));
     }
 
     shared_ptr<MetalQueueState> queue;
@@ -63,6 +212,7 @@ struct MetalKernel::Impl {
     string name;
     MetalBindingMode bindingMode;
     int argumentBufferIndex;
+    map<size_t, ArgumentBufferSlot> argumentBufferSlots;
     vector<KernelArgument> arguments;
     mutex argumentMutex;
 };
@@ -71,8 +221,8 @@ MetalProgram::MetalProgram(MetalQueue& queue, const string& source, const MetalP
     @autoreleasepool {
         if (source.empty())
             throw OpenMMException("Cannot compile an empty Metal program");
-        if (options.languageVersionMajor < 0 || options.languageVersionMinor < 0 ||
-                options.languageVersionMinor > 0xffff)
+        if (options.languageVersionMajor < 0 || options.languageVersionMajor > 0xffff ||
+                options.languageVersionMinor < 0 || options.languageVersionMinor > 0xffff)
             throw OpenMMException("Invalid Metal language version");
         queue.state->checkForErrors();
         impl->queue = queue.state;
@@ -105,17 +255,29 @@ shared_ptr<MetalKernel> MetalProgram::createMetalKernel(const string& name,
     @autoreleasepool {
         if (argumentBufferIndex < 0)
             throw OpenMMException("Metal argument buffer index must not be negative");
+        if (bindingMode != MetalBindingMode::Direct && bindingMode != MetalBindingMode::ArgumentBuffer)
+            throw OpenMMException("Unknown Metal kernel binding mode");
         NSString* nativeName = makeNSString(name, "Metal kernel name");
         id<MTLFunction> function = [impl->library newFunctionWithName:nativeName];
         if (function == nil)
             throw OpenMMException("Metal program does not contain a kernel named '"+name+"'");
 
         NSError* error = nil;
-        id<MTLComputePipelineState> pipeline = [impl->queue->device newComputePipelineStateWithFunction:function error:&error];
+        MTLComputePipelineReflection* reflection = nil;
+        id<MTLComputePipelineState> pipeline;
+        if (bindingMode == MetalBindingMode::ArgumentBuffer) {
+            pipeline = [impl->queue->device newComputePipelineStateWithFunction:function
+                                                                          options:(MTLPipelineOptionBindingInfo |
+                                                                                   MTLPipelineOptionBufferTypeInfo)
+                                                                       reflection:&reflection
+                                                                            error:&error];
+        }
+        else
+            pipeline = [impl->queue->device newComputePipelineStateWithFunction:function error:&error];
         if (pipeline == nil)
             throw OpenMMException("Error creating Metal pipeline for kernel '"+name+"': "+describeError(error));
         unique_ptr<MetalKernel::Impl> kernelImpl(new MetalKernel::Impl(impl->queue, function, pipeline,
-                                                                       bindingMode, argumentBufferIndex));
+                                                                       bindingMode, argumentBufferIndex, reflection));
         return shared_ptr<MetalKernel>(new MetalKernel(std::move(kernelImpl)));
     }
 }
@@ -172,7 +334,7 @@ void MetalKernel::execute(int threads, int blockSize) {
             for (size_t i = 0; i < impl->arguments.size(); i++) {
                 const KernelArgument& argument = impl->arguments[i];
                 if (argument.type == KernelArgument::Type::Array) {
-                    id<MTLBuffer> buffer = MetalArrayAccess::getBuffer(*argument.array);
+                    id<MTLBuffer> buffer = argument.buffer->getBuffer();
                     [encoder setBuffer:buffer offset:0 atIndex:i];
                 }
                 else {
@@ -191,7 +353,7 @@ void MetalKernel::execute(int threads, int blockSize) {
             for (size_t i = 0; i < impl->arguments.size(); i++) {
                 const KernelArgument& argument = impl->arguments[i];
                 if (argument.type == KernelArgument::Type::Array) {
-                    id<MTLBuffer> buffer = MetalArrayAccess::getBuffer(*argument.array);
+                    id<MTLBuffer> buffer = argument.buffer->getBuffer();
                     [impl->argumentEncoder setBuffer:buffer offset:0 atIndex:i];
                     [encoder useResource:buffer usage:(MTLResourceUsageRead | MTLResourceUsageWrite)];
                 }
@@ -200,6 +362,14 @@ void MetalKernel::execute(int threads, int blockSize) {
                     if (destination == NULL)
                         throw OpenMMException("Argument "+to_string(i)+" of Metal kernel "+impl->name+
                                               " is not inline data in its argument buffer");
+                    uintptr_t baseAddress = reinterpret_cast<uintptr_t>(argumentBuffer.contents);
+                    uintptr_t destinationAddress = reinterpret_cast<uintptr_t>(destination);
+                    size_t encodedLength = impl->argumentEncoder.encodedLength;
+                    if (destinationAddress < baseAddress ||
+                            destinationAddress-baseAddress > encodedLength ||
+                            argument.primitive.size() > encodedLength-(destinationAddress-baseAddress))
+                        throw OpenMMException("Reflected constant slot "+to_string(i)+
+                                              " is outside the argument buffer for kernel "+impl->name);
                     memcpy(destination, argument.primitive.data(), argument.primitive.size());
                 }
             }
@@ -220,11 +390,13 @@ void MetalKernel::addArrayArg(ArrayInterface& value) {
         throw OpenMMException("Metal kernel arguments must be MetalArray objects");
     if (!array->isInitialized())
         throw OpenMMException("Cannot bind an uninitialized MetalArray to kernel "+impl->name);
-    if (MetalArrayAccess::getQueueState(*array).get() != impl->queue.get())
+    shared_ptr<MetalBufferState> buffer = MetalArrayAccess::getBufferState(*array);
+    if (buffer->queue.get() != impl->queue.get())
         throw OpenMMException("Cannot bind a MetalArray from a different command queue to kernel "+impl->name);
+    impl->validateBufferSlot(impl->arguments.size());
     KernelArgument argument;
     argument.type = KernelArgument::Type::Array;
-    argument.array = array;
+    argument.buffer = buffer;
     impl->arguments.push_back(argument);
 }
 
@@ -232,6 +404,7 @@ void MetalKernel::addPrimitiveArg(const void* value, int size) {
     lock_guard<mutex> lock(impl->argumentMutex);
     if (size <= 0 || value == NULL)
         throw OpenMMException("Primitive Metal kernel arguments must contain at least one byte");
+    impl->validateConstantSlot(impl->arguments.size(), static_cast<size_t>(size));
     KernelArgument argument;
     argument.type = KernelArgument::Type::Primitive;
     const unsigned char* bytes = reinterpret_cast<const unsigned char*>(value);
@@ -253,11 +426,13 @@ void MetalKernel::setArrayArg(int index, ArrayInterface& value) {
         throw OpenMMException("Metal kernel arguments must be MetalArray objects");
     if (!array->isInitialized())
         throw OpenMMException("Cannot bind an uninitialized MetalArray to kernel "+impl->name);
-    if (MetalArrayAccess::getQueueState(*array).get() != impl->queue.get())
+    shared_ptr<MetalBufferState> buffer = MetalArrayAccess::getBufferState(*array);
+    if (buffer->queue.get() != impl->queue.get())
         throw OpenMMException("Cannot bind a MetalArray from a different command queue to kernel "+impl->name);
+    impl->validateBufferSlot(static_cast<size_t>(index));
     KernelArgument& argument = impl->arguments[index];
     argument.type = KernelArgument::Type::Array;
-    argument.array = array;
+    argument.buffer = buffer;
     argument.primitive.clear();
 }
 
@@ -267,9 +442,10 @@ void MetalKernel::setPrimitiveArg(int index, const void* value, int size) {
         throw OpenMMException("Invalid argument index for Metal kernel "+impl->name);
     if (size <= 0 || value == NULL)
         throw OpenMMException("Primitive Metal kernel arguments must contain at least one byte");
+    impl->validateConstantSlot(static_cast<size_t>(index), static_cast<size_t>(size));
     KernelArgument& argument = impl->arguments[index];
     argument.type = KernelArgument::Type::Primitive;
-    argument.array = NULL;
+    argument.buffer.reset();
     const unsigned char* bytes = reinterpret_cast<const unsigned char*>(value);
     argument.primitive.assign(bytes, bytes+size);
 }
