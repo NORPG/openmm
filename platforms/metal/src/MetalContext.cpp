@@ -300,7 +300,9 @@ ComputeSort MetalContext::createSort(ComputeSortImpl::SortTrait* trait, unsigned
 }
 
 ComputeProgram MetalContext::compileProgram(const string source, const map<string, string>& defines) {
-    const string completeSource = MetalKernelSources::fixedPoint+"\n"+addDefines(source, defines);
+    const string completeSource = MetalKernelSources::counterAtomics+"\n"+
+                                  MetalKernelSources::fixedPoint+"\n"+
+                                  addDefines(source, defines);
     return ComputeProgram(new MetalProgram(getCurrentMetalQueue(), completeSource));
 }
 

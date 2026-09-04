@@ -41,6 +41,60 @@ float reconstructFixedPointOnHost(const MetalFixedPoint64Storage& value) {
     return negative ? -converted : converted;
 }
 
+void testCounterAtomicHelper(MetalContext& context) {
+    const string source = R"MSL(
+kernel void addCounter32Atomically(
+        device atomic_int* counters [[buffer(0)]],
+        device int* previousValues [[buffer(1)]],
+        constant uint& counterIndex [[buffer(2)]],
+        constant int& addend [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    previousValues[index] = atomicFetchAddCounter32(
+            &counters[counterIndex], addend);
+}
+)MSL";
+    ComputeProgram program = context.compileProgram(source);
+
+    const uint32_t threadCount = 32768;
+    const uint32_t counterIndex = 1;
+    const int32_t addend = 3;
+    const vector<int32_t> initialCounters = {-19, 17, -31};
+
+    ComputeArray counters;
+    ComputeArray previousValues;
+    counters.initialize<int32_t>(context, initialCounters.size(),
+                                 "ordinary signed 32-bit atomic counters");
+    previousValues.initialize<int32_t>(context, threadCount,
+                                       "counter atomic previous values");
+    counters.upload(initialCounters);
+
+    ComputeKernel addCounter = program->createKernel("addCounter32Atomically");
+    addCounter->addArg(counters);
+    addCounter->addArg(previousValues);
+    addCounter->addArg(counterIndex);
+    addCounter->addArg(addend);
+    addCounter->execute(threadCount, min(256, addCounter->getMaxBlockSize()));
+
+    vector<int32_t> actualPreviousValues;
+    vector<int32_t> finalCounters;
+    previousValues.download(actualPreviousValues);
+    counters.download(finalCounters);
+
+    vector<int32_t> expectedPreviousValues(threadCount);
+    int32_t expectedFinalValue = initialCounters[counterIndex];
+    for (uint32_t i = 0; i < threadCount; i++) {
+        expectedPreviousValues[i] = expectedFinalValue;
+        expectedFinalValue += addend;
+    }
+    sort(actualPreviousValues.begin(), actualPreviousValues.end());
+    sort(expectedPreviousValues.begin(), expectedPreviousValues.end());
+    for (uint32_t i = 0; i < threadCount; i++)
+        ASSERT_EQUAL(expectedPreviousValues[i], actualPreviousValues[i]);
+    ASSERT_EQUAL(initialCounters[0], finalCounters[0]);
+    ASSERT_EQUAL(expectedFinalValue, finalCounters[counterIndex]);
+    ASSERT_EQUAL(initialCounters[2], finalCounters[2]);
+}
+
 void testFixedPointHelpers(MetalContext& context) {
     struct ConversionCase {
         float input;
@@ -533,6 +587,7 @@ void testLongForceBuffer() {
         ASSERT_EQUAL(0u, value.hi);
     }
     testFixedPointHelpers(context);
+    testCounterAtomicHelper(context);
 }
 
 void testCoreContextSurface() {
