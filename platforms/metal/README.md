@@ -25,9 +25,9 @@ supported.
 
 ## Logical 64-bit fixed-point storage ABI
 
-The future Common force accumulator uses an explicitly split logical 64-bit
-storage element.  Its host representation is `MetalFixedPoint64Storage`; the
-corresponding read-only MSL view is `uint2`:
+The Common-compatible force accumulator uses an explicitly split logical
+64-bit storage element.  Its host representation is
+`MetalFixedPoint64Storage`; the corresponding read-only MSL view is `uint2`:
 
 - each element is exactly 8 bytes and aligned to 8 bytes;
 - word 0 / `x` / `lo` stores bits 0-31;
@@ -41,12 +41,24 @@ The byte offset of a logical component is therefore
 `8*(atom + axis*paddedNumAtoms)`.  The complete buffer contains
 `3*paddedNumAtoms` logical elements, or `24*paddedNumAtoms` bytes.
 
+`MetalContext` owns this buffer as a distinct private `MetalArray`, initializes
+it to zero, exposes it through `getLongForceBuffer()`, and registers it for
+automatic clearing at the start of every force evaluation.  The context's
+pinned transfer storage is sized to include the complete long force buffer.
+Zeroing an aligned compute buffer is encoded as a GPU blit fill on the buffer's
+command queue, so long-force initialization and autoclear do not allocate or
+upload a host-sized zero array.  Queue ordering makes a following kernel or
+download observe the completed clear.
+
+GPU buffer copies preserve all 8 bytes of every logical element for Common's
+save/restore paths.
+
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components
 through a `uint2` view.  Read-only `uint2` access is permitted only after all
-atomic writers have completed.  This section defines storage and layout only;
-the two-word atomic-add algorithm and force-buffer routing are separate work.
+atomic writers have completed.  The two-word atomic-add algorithm and routing
+Common force producers into this buffer remain separate work.
 
 ## Current support boundary
 

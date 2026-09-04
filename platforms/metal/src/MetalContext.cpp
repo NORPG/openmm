@@ -97,6 +97,7 @@ MetalContext::MetalContext(const System& system, ContextImpl* owner, size_t devi
     positions.reset(new MetalArray());
     velocities.reset(new MetalArray());
     forces.reset(new MetalArray());
+    longForceBuffer.reset(new MetalArray());
     inverseMasses.reset(new MetalArray());
     energyBuffer.reset(new MetalArray());
     energyParamDerivBuffer.reset(new MetalArray());
@@ -104,6 +105,8 @@ MetalContext::MetalContext(const System& system, ContextImpl* owner, size_t devi
     positions->initialize(*this, *queue, paddedNumAtoms, sizeof(MetalFloat4), "Metal posq");
     velocities->initialize(*this, *queue, paddedNumAtoms, sizeof(MetalFloat4), "Metal velm");
     forces->initialize(*this, *queue, paddedNumAtoms, sizeof(MetalFloat4), "Metal force buffer");
+    longForceBuffer->initialize(*this, *queue, 3*static_cast<size_t>(paddedNumAtoms),
+                                sizeof(MetalFixedPoint64Storage), "Metal long force buffer");
     inverseMasses->initialize(*this, *queue, paddedNumAtoms, sizeof(float), "Metal inverse masses");
     energyBuffer->initialize(*this, *queue, numThreadBlocks*ThreadBlockSize, sizeof(float), "Metal energy buffer");
     energyParamDerivBuffer->initialize(*this, *queue, 1, sizeof(float), "Metal energy parameter derivative buffer");
@@ -129,6 +132,8 @@ MetalContext::MetalContext(const System& system, ContextImpl* owner, size_t devi
     forces->upload(forceValues);
     inverseMasses->upload(inverseMassValues);
     atomIndexDevice->upload(atomIndex);
+    clearBuffer(*longForceBuffer);
+    addAutoclearBuffer(*longForceBuffer);
     clearBuffer(*energyBuffer);
     clearBuffer(*energyParamDerivBuffer);
     updatePinnedBufferSize();
@@ -389,7 +394,7 @@ MetalArray& MetalContext::getFloatForceBuffer() {
 }
 
 ArrayInterface& MetalContext::getLongForceBuffer() {
-    throwUnsupported("64-bit fixed-point force buffers");
+    return *longForceBuffer;
 }
 
 MetalArray& MetalContext::getEnergyBuffer() {
@@ -505,8 +510,9 @@ void MetalContext::flushQueue() {
 
 void MetalContext::updatePinnedBufferSize() {
     size_t bytes = 1;
-    const MetalArray* arrays[] = {positions.get(), velocities.get(), forces.get(), inverseMasses.get(),
-                                  energyBuffer.get(), energyParamDerivBuffer.get(), atomIndexDevice.get()};
+    const MetalArray* arrays[] = {positions.get(), velocities.get(), forces.get(), longForceBuffer.get(),
+                                  inverseMasses.get(), energyBuffer.get(), energyParamDerivBuffer.get(),
+                                  atomIndexDevice.get()};
     for (const MetalArray* array : arrays) {
         if (array != NULL && array->isInitialized())
             bytes = max(bytes, array->getSize()*static_cast<size_t>(array->getElementSize()));
