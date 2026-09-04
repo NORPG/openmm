@@ -6,6 +6,7 @@
 #include "openmm/internal/AssertionUtilities.h"
 #include "openmm/internal/ThreadPool.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -29,6 +30,220 @@ void testFixedPointHostABI() {
     ASSERT_EQUAL(8, static_cast<int>(alignof(MetalFixedPoint64Storage)));
     ASSERT_EQUAL(0, static_cast<int>(offsetof(MetalFixedPoint64Storage, lo)));
     ASSERT_EQUAL(4, static_cast<int>(offsetof(MetalFixedPoint64Storage, hi)));
+}
+
+float reconstructFixedPointOnHost(const MetalFixedPoint64Storage& value) {
+    const uint64_t bits = (static_cast<uint64_t>(value.hi) << 32) | value.lo;
+    const bool negative = (value.hi & 0x80000000u) != 0u;
+    const uint64_t magnitude = negative ? (~bits)+1u : bits;
+    const float converted = static_cast<float>(magnitude)*ldexp(1.0f, -32);
+    return negative ? -converted : converted;
+}
+
+void testFixedPointHelpers(MetalContext& context) {
+    struct ConversionCase {
+        float input;
+        uint32_t lo;
+        uint32_t hi;
+        float reconstructed;
+    };
+    const float unit = ldexp(1.0f, -32);
+    const float predecessorOfOne = nextafter(1.0f, 0.0f);
+    const float twoTo31 = ldexp(1.0f, 31);
+    const float largestValidFloat = nextafter(twoTo31, 0.0f);
+    const vector<ConversionCase> cases = {
+        {0.0f, 0x00000000u, 0x00000000u, 0.0f},
+        {unit, 0x00000001u, 0x00000000u, unit},
+        {-unit, 0xffffffffu, 0xffffffffu, -unit},
+        {0.5f, 0x80000000u, 0x00000000u, 0.5f},
+        {-0.5f, 0x80000000u, 0xffffffffu, -0.5f},
+        {predecessorOfOne, 0xffffff00u, 0x00000000u, predecessorOfOne},
+        {-predecessorOfOne, 0x00000100u, 0xffffffffu, -predecessorOfOne},
+        {1.0f, 0x00000000u, 0x00000001u, 1.0f},
+        {-1.0f, 0x00000000u, 0xffffffffu, -1.0f},
+        {1.5f, 0x80000000u, 0x00000001u, 1.5f},
+        {-1.5f, 0x80000000u, 0xfffffffeu, -1.5f},
+        {123.75f, 0xc0000000u, 0x0000007bu, 123.75f},
+        {-123.75f, 0x40000000u, 0xffffff84u, -123.75f},
+        {largestValidFloat, 0x00000000u, 0x7fffff80u, largestValidFloat},
+        {-twoTo31, 0x00000000u, 0x80000000u, -twoTo31},
+        {0.75f*unit, 0x00000000u, 0x00000000u, 0.0f},
+        {-0.75f*unit, 0x00000000u, 0x00000000u, 0.0f},
+        {1.5f*unit, 0x00000001u, 0x00000000u, unit},
+        {-1.5f*unit, 0xffffffffu, 0xffffffffu, -unit}
+    };
+
+    const string source = R"MSL(
+kernel void convertFixedPointHelpers(device const float* input [[buffer(0)]],
+                                     device uint2* converted [[buffer(1)]],
+                                     device uint2* split [[buffer(2)]],
+                                     device float* reconstructed [[buffer(3)]],
+                                     constant uint& count [[buffer(4)]],
+                                     uint index [[thread_position_in_grid]]) {
+    if (index >= count)
+        return;
+    const float value = input[index];
+    const float integral = trunc(value);
+    const float scaledFraction = (value-integral)*0x1.0p32f;
+    const uint fractionalMagnitude = uint(fabs(scaledFraction));
+    converted[index] = realToFixedPoint(value);
+    split[index] = splitFixedPoint(int(integral), fractionalMagnitude,
+                                   scaledFraction <= -1.0f);
+    reconstructed[index] = reconstructSignedFixedPoint(converted[index]);
+}
+
+kernel void loadFixedPointHelpers(device const uint2* input [[buffer(0)]],
+                                  device uint2* loaded [[buffer(1)]],
+                                  device float* reconstructed [[buffer(2)]],
+                                  constant uint& count [[buffer(3)]],
+                                  uint index [[thread_position_in_grid]]) {
+    if (index >= count)
+        return;
+    loaded[index] = loadFixedPoint(input, index);
+    reconstructed[index] = loadSignedFixedPoint(input, index);
+}
+
+kernel void loadFixedPointPlanes(device const uint2* input [[buffer(0)]],
+                                 device float4* output [[buffer(1)]],
+                                 constant uint& atom [[buffer(2)]],
+                                 constant uint& paddedNumAtoms [[buffer(3)]],
+                                 uint index [[thread_position_in_grid]]) {
+    if (index == 0u)
+        output[0] = float4(loadFixedPoint3(input, atom, paddedNumAtoms), 0.0f);
+}
+)MSL";
+    ComputeProgram program = context.compileProgram(source);
+
+    vector<float> inputValues;
+    for (const auto& test : cases)
+        inputValues.push_back(test.input);
+    ComputeArray input;
+    ComputeArray converted;
+    ComputeArray split;
+    ComputeArray reconstructed;
+    input.initialize<float>(context, cases.size(), "fixed-point conversion input");
+    converted.initialize<MetalFixedPoint64Storage>(context, cases.size(),
+                                                    "converted fixed-point words");
+    split.initialize<MetalFixedPoint64Storage>(context, cases.size(),
+                                               "split fixed-point words");
+    reconstructed.initialize<float>(context, cases.size(),
+                                    "reconstructed fixed-point values");
+    input.upload(inputValues);
+
+    ComputeKernel convert = program->createKernel("convertFixedPointHelpers");
+    const uint32_t conversionCount = static_cast<uint32_t>(cases.size());
+    convert->addArg(input);
+    convert->addArg(converted);
+    convert->addArg(split);
+    convert->addArg(reconstructed);
+    convert->addArg(conversionCount);
+    convert->execute(conversionCount);
+
+    vector<MetalFixedPoint64Storage> convertedWords;
+    vector<MetalFixedPoint64Storage> splitWords;
+    vector<float> reconstructedValues;
+    converted.download(convertedWords);
+    split.download(splitWords);
+    reconstructed.download(reconstructedValues);
+    for (size_t i = 0; i < cases.size(); i++) {
+        ASSERT_EQUAL(cases[i].lo, convertedWords[i].lo);
+        ASSERT_EQUAL(cases[i].hi, convertedWords[i].hi);
+        ASSERT_EQUAL(cases[i].lo, splitWords[i].lo);
+        ASSERT_EQUAL(cases[i].hi, splitWords[i].hi);
+        ASSERT_EQUAL(cases[i].reconstructed, reconstructedValues[i]);
+    }
+
+    vector<MetalFixedPoint64Storage> rawValues = {
+        {0x00000000u, 0x00000000u},
+        {0x00000001u, 0x00000000u},
+        {0xffffffffu, 0xffffffffu},
+        {0xffffffffu, 0x00000000u},
+        {0x00000001u, 0xffffffffu},
+        {0x40000000u, 0x00000001u},
+        {0x80000000u, 0xfffffffeu},
+        {0x00000000u, 0x80000000u},
+        {0x2cb49649u, 0x01cfca81u},
+        {0xd34b69b7u, 0xfe30357eu},
+        // Exact half ties with even and odd retained significands.
+        {0x01000001u, 0x00000000u},
+        {0x01000003u, 0x00000000u},
+        // Rounding carries out of the 24-bit significand.
+        {0x01ffffffu, 0x00000000u},
+        // The discarded portion begins exactly at the low/high word boundary.
+        {0x80000000u, 0x00800000u},
+        {0x80000000u, 0x00800001u}
+    };
+    uint32_t randomState = 0x12345678u;
+    for (int i = 0; i < 2048; i++) {
+        randomState = 1664525u*randomState+1013904223u;
+        const uint32_t lo = randomState;
+        randomState = 1664525u*randomState+1013904223u;
+        rawValues.push_back({lo, randomState});
+    }
+    vector<float> expectedRawValues;
+    for (const auto& value : rawValues)
+        expectedRawValues.push_back(reconstructFixedPointOnHost(value));
+
+    ComputeArray rawInput;
+    ComputeArray rawLoaded;
+    ComputeArray rawReconstructed;
+    rawInput.initialize<MetalFixedPoint64Storage>(context, rawValues.size(),
+                                                  "raw fixed-point input");
+    rawLoaded.initialize<MetalFixedPoint64Storage>(context, rawValues.size(),
+                                                   "loaded fixed-point words");
+    rawReconstructed.initialize<float>(context, rawValues.size(),
+                                       "loaded fixed-point values");
+    rawInput.upload(rawValues);
+    ComputeKernel load = program->createKernel("loadFixedPointHelpers");
+    const uint32_t rawCount = static_cast<uint32_t>(rawValues.size());
+    load->addArg(rawInput);
+    load->addArg(rawLoaded);
+    load->addArg(rawReconstructed);
+    load->addArg(rawCount);
+    load->execute(rawCount);
+
+    vector<MetalFixedPoint64Storage> loadedWords;
+    vector<float> loadedValues;
+    rawLoaded.download(loadedWords);
+    rawReconstructed.download(loadedValues);
+    for (size_t i = 0; i < rawValues.size(); i++) {
+        ASSERT_EQUAL(rawValues[i].lo, loadedWords[i].lo);
+        ASSERT_EQUAL(rawValues[i].hi, loadedWords[i].hi);
+        ASSERT_EQUAL(expectedRawValues[i], loadedValues[i]);
+    }
+    ASSERT_EQUAL(30395010.0f, loadedValues[8]);
+    ASSERT_EQUAL(-30395010.0f, loadedValues[9]);
+    ASSERT_EQUAL(ldexp(1.0f, -8), loadedValues[10]);
+    ASSERT_EQUAL(ldexp(8388610.0f, -31), loadedValues[11]);
+    ASSERT_EQUAL(ldexp(1.0f, -7), loadedValues[12]);
+    ASSERT_EQUAL(8388608.0f, loadedValues[13]);
+    ASSERT_EQUAL(8388610.0f, loadedValues[14]);
+
+    ArrayInterface& longForces = context.getLongForceBuffer();
+    const uint32_t paddedNumAtoms = static_cast<uint32_t>(context.getPaddedNumAtoms());
+    const uint32_t atom = 17;
+    vector<MetalFixedPoint64Storage> planeValues(longForces.getSize(), {0u, 0u});
+    planeValues[atom] = {0x40000000u, 0x00000001u};
+    planeValues[atom+paddedNumAtoms] = {0x80000000u, 0xfffffffeu};
+    planeValues[atom+2*paddedNumAtoms] = {0x00000001u, 0x00000000u};
+    for (uint32_t axis = 0; axis < 3; axis++)
+        planeValues[3*atom+axis] = {0x00000000u, 0x0000007fu+axis};
+    longForces.upload(planeValues);
+
+    ComputeArray planeOutput;
+    planeOutput.initialize<MetalFloat4>(context, 1, "loaded fixed-point planes");
+    ComputeKernel loadPlanes = program->createKernel("loadFixedPointPlanes");
+    loadPlanes->addArg(longForces);
+    loadPlanes->addArg(planeOutput);
+    loadPlanes->addArg(atom);
+    loadPlanes->addArg(paddedNumAtoms);
+    loadPlanes->execute(1);
+    vector<MetalFloat4> loadedPlanes;
+    planeOutput.download(loadedPlanes);
+    ASSERT_EQUAL(1.25f, loadedPlanes[0].x);
+    ASSERT_EQUAL(-1.5f, loadedPlanes[0].y);
+    ASSERT_EQUAL(unit, loadedPlanes[0].z);
+    ASSERT_EQUAL(0.0f, loadedPlanes[0].w);
 }
 
 void testLongForceBuffer() {
@@ -133,6 +348,7 @@ void testLongForceBuffer() {
         ASSERT_EQUAL(0u, value.lo);
         ASSERT_EQUAL(0u, value.hi);
     }
+    testFixedPointHelpers(context);
 }
 
 void testCoreContextSurface() {
@@ -221,7 +437,10 @@ kernel void addValue(device float* values [[buffer(0)]],
 }
 )MSL";
     values.upload(input);
-    ComputeProgram program = context.compileProgram(source, {{"TEST_INCREMENT", "1.5f"}});
+    ComputeProgram program = context.compileProgram(source, {
+        {"TEST_INCREMENT", "1.5f"},
+        {"magnitude", "1"}
+    });
     ComputeKernel kernel = program->createKernel("addValue");
     unsigned int count = 4;
     kernel->addArg(values);
