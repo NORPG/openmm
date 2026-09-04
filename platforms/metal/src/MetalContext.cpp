@@ -321,12 +321,7 @@ MetalArray& MetalContext::unwrap(ArrayInterface& array) const {
 }
 
 void MetalContext::clearBuffer(ArrayInterface& array) {
-    MetalArray& metal = unwrap(array);
-    size_t bytes = metal.getSize()*static_cast<size_t>(metal.getElementSize());
-    if (bytes == 0)
-        return;
-    vector<unsigned char> zero(bytes, 0);
-    metal.upload(zero.data(), false);
+    unwrap(array).clear(false);
 }
 
 void MetalContext::addAutoclearBuffer(ArrayInterface& array) {

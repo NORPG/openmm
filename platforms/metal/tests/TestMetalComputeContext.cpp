@@ -5,6 +5,7 @@
 #include "openmm/internal/AssertionUtilities.h"
 #include "openmm/internal/ThreadPool.h"
 
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <map>
@@ -82,6 +83,18 @@ void testCoreContextSurface() {
     values.download(output);
     for (float value : output)
         ASSERT_EQUAL_TOL(0.0, value, 1e-6);
+
+    // macOS blit fills require four-byte range boundaries.  Verify that the
+    // staged fallback preserves clearBuffer() for arbitrary logical sizes.
+    ComputeArray bytes;
+    bytes.initialize<uint8_t>(context, 7, "odd-sized clear buffer");
+    vector<uint8_t> byteInput(7, 0xa5u);
+    vector<uint8_t> byteOutput;
+    bytes.upload(byteInput);
+    context.clearBuffer(bytes);
+    bytes.download(byteOutput);
+    for (uint8_t value : byteOutput)
+        ASSERT_EQUAL(0u, static_cast<unsigned int>(value));
 
     const string source = R"MSL(
 #include <metal_stdlib>
