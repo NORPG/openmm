@@ -51,6 +51,7 @@ int main() {
             VirtualSitesKernel::Name(),
             MinimizeKernel::Name(),
             CalcHarmonicBondForceKernel::Name(),
+            CalcNonbondedForceKernel::Name(),
             IntegrateVerletStepKernel::Name()
         };
         ASSERT(platform.supportsKernels(phaseOneKernels));

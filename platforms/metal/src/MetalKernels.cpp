@@ -37,6 +37,7 @@
 #include "openmm/OpenMMException.h"
 #include "openmm/internal/ContextImpl.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -63,6 +64,18 @@ struct MetalBondIndex {
 struct MetalBondParameter {
     float length;
     float k;
+};
+
+struct MetalNonbondedParameter {
+    float charge;
+    float sigma;
+    float epsilon;
+    float padding;
+};
+
+struct MetalExceptionEntry {
+    uint32_t particle;
+    uint32_t exception;
 };
 
 MetalContext& getMetalContext(ContextImpl& context) {
@@ -373,6 +386,218 @@ void MetalCalcHarmonicBondForceKernel::copyParametersToContext(ContextImpl& cont
     }
     impl->parameters->uploadSubArray(impl->hostParameters.data()+firstBond, firstBond,
                                      lastBond-firstBond+1, true);
+}
+
+class MetalCalcNonbondedForceKernel::Impl {
+public:
+    explicit Impl(MetalContext& context) : context(&context), numParticles(context.getNumParticles()),
+            numExceptions(0), initialized(false) {
+    }
+
+    MetalContext* context;
+    uint32_t numParticles;
+    uint32_t numExceptions;
+    bool initialized;
+    vector<MetalNonbondedParameter> hostParticleParameters;
+    vector<MetalBondIndex> hostExceptionParticles;
+    vector<MetalNonbondedParameter> hostExceptionParameters;
+    vector<uint32_t> hostExceptionOffsets;
+    vector<MetalExceptionEntry> hostExceptionEntries;
+    unique_ptr<MetalArray> particleParameters;
+    unique_ptr<MetalArray> exceptionOffsets;
+    unique_ptr<MetalArray> exceptionEntries;
+    unique_ptr<MetalArray> exceptionParameters;
+    unique_ptr<MetalArray> energyByParticle;
+    unique_ptr<MetalProgram> program;
+    shared_ptr<MetalKernel> kernel;
+};
+
+MetalCalcNonbondedForceKernel::MetalCalcNonbondedForceKernel(string name, const Platform& platform,
+                                                             ContextImpl& context) :
+        CalcNonbondedForceKernel(name, platform), impl(new Impl(getMetalContext(context))) {
+}
+
+MetalCalcNonbondedForceKernel::~MetalCalcNonbondedForceKernel() {
+}
+
+void MetalCalcNonbondedForceKernel::initialize(const System& system, const NonbondedForce& force) {
+    if (impl->initialized)
+        throw OpenMMException("The Metal nonbonded kernel has already been initialized");
+    if (force.getNonbondedMethod() != NonbondedForce::NoCutoff)
+        throw OpenMMException("The native Metal backend currently supports only NoCutoff NonbondedForce");
+    if (force.getNumParticleParameterOffsets() != 0 || force.getNumExceptionParameterOffsets() != 0)
+        throw OpenMMException("The native Metal backend does not yet support NonbondedForce parameter offsets");
+    if (system.getNumParticles() != static_cast<int>(impl->numParticles) ||
+            force.getNumParticles() != static_cast<int>(impl->numParticles))
+        throw OpenMMException("The Metal nonbonded kernel was created for a different System");
+
+    impl->numExceptions = static_cast<uint32_t>(force.getNumExceptions());
+    impl->hostParticleParameters.resize(impl->numParticles);
+    for (uint32_t i = 0; i < impl->numParticles; i++) {
+        double charge, sigma, epsilon;
+        force.getParticleParameters(i, charge, sigma, epsilon);
+        impl->hostParticleParameters[i] = {static_cast<float>(charge), static_cast<float>(sigma),
+                                           static_cast<float>(epsilon), 0.0f};
+    }
+
+    impl->hostExceptionParticles.resize(impl->numExceptions);
+    impl->hostExceptionParameters.resize(impl->numExceptions);
+    vector<vector<MetalExceptionEntry> > adjacency(impl->numParticles);
+    for (uint32_t i = 0; i < impl->numExceptions; i++) {
+        int particle1, particle2;
+        double chargeProd, sigma, epsilon;
+        force.getExceptionParameters(i, particle1, particle2, chargeProd, sigma, epsilon);
+        const uint32_t first = static_cast<uint32_t>(min(particle1, particle2));
+        const uint32_t second = static_cast<uint32_t>(max(particle1, particle2));
+        impl->hostExceptionParticles[i] = {first, second};
+        impl->hostExceptionParameters[i] = {static_cast<float>(chargeProd), static_cast<float>(sigma),
+                                            static_cast<float>(epsilon), 0.0f};
+        adjacency[first].push_back({second, i});
+        adjacency[second].push_back({first, i});
+    }
+
+    impl->hostExceptionOffsets.resize(static_cast<size_t>(impl->numParticles)+1);
+    for (uint32_t particle = 0; particle < impl->numParticles; particle++) {
+        vector<MetalExceptionEntry>& entries = adjacency[particle];
+        sort(entries.begin(), entries.end(), [](const MetalExceptionEntry& first,
+                                                const MetalExceptionEntry& second) {
+            return first.particle < second.particle;
+        });
+        impl->hostExceptionOffsets[particle] = static_cast<uint32_t>(impl->hostExceptionEntries.size());
+        impl->hostExceptionEntries.insert(impl->hostExceptionEntries.end(), entries.begin(), entries.end());
+    }
+    impl->hostExceptionOffsets[impl->numParticles] = static_cast<uint32_t>(impl->hostExceptionEntries.size());
+
+    MetalQueue& queue = impl->context->getQueue();
+    impl->particleParameters.reset(new MetalArray(queue, impl->numParticles,
+            sizeof(MetalNonbondedParameter), "Metal nonbonded particle parameters"));
+    impl->exceptionOffsets.reset(new MetalArray(queue, impl->hostExceptionOffsets.size(),
+            sizeof(uint32_t), "Metal nonbonded exception offsets"));
+    impl->exceptionEntries.reset(new MetalArray(queue, impl->hostExceptionEntries.size(),
+            sizeof(MetalExceptionEntry), "Metal nonbonded exception entries"));
+    impl->exceptionParameters.reset(new MetalArray(queue, impl->numExceptions,
+            sizeof(MetalNonbondedParameter), "Metal nonbonded exception parameters"));
+    impl->energyByParticle.reset(new MetalArray(queue, impl->numParticles,
+            sizeof(float), "Metal nonbonded energy"));
+    if (impl->numParticles != 0)
+        impl->particleParameters->upload(impl->hostParticleParameters.data(), true);
+    impl->exceptionOffsets->upload(impl->hostExceptionOffsets.data(), true);
+    if (impl->numExceptions != 0) {
+        impl->exceptionEntries->upload(impl->hostExceptionEntries.data(), true);
+        impl->exceptionParameters->upload(impl->hostExceptionParameters.data(), true);
+    }
+
+#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
+    impl->program = loadProductionMetalProgram(queue);
+#else
+    impl->program.reset(new MetalProgram(queue, MetalKernelSources::nonbonded));
+#endif
+    impl->kernel = impl->program->createMetalKernel("computeNoCutoffNonbonded");
+    impl->kernel->addArg(impl->context->getPositions());
+    impl->kernel->addArg(impl->context->getForces());
+    impl->kernel->addArg(*impl->particleParameters);
+    impl->kernel->addArg(*impl->exceptionOffsets);
+    impl->kernel->addArg(*impl->exceptionEntries);
+    impl->kernel->addArg(*impl->exceptionParameters);
+    impl->kernel->addArg(*impl->energyByParticle);
+    impl->kernel->addArg(impl->numParticles);
+    impl->kernel->addArg(uint32_t(0));
+    impl->kernel->addArg(uint32_t(0));
+    impl->initialized = true;
+}
+
+double MetalCalcNonbondedForceKernel::execute(ContextImpl& context, bool includeForces,
+                                               bool includeEnergy, bool includeDirect,
+                                               bool includeReciprocal) {
+    (void) includeReciprocal;
+    if (!impl->initialized)
+        throw OpenMMException("The Metal nonbonded kernel has not been initialized");
+    if (&getMetalContext(context) != impl->context)
+        throw OpenMMException("The Metal nonbonded kernel cannot be used with a different Context");
+    if (!includeDirect || (!includeForces && !includeEnergy) || impl->numParticles == 0)
+        return 0.0;
+
+    impl->kernel->setArg(8, static_cast<uint32_t>(includeForces));
+    impl->kernel->setArg(9, static_cast<uint32_t>(includeEnergy));
+    impl->kernel->execute(static_cast<int>(impl->numParticles));
+    if (!includeEnergy)
+        return 0.0;
+
+    vector<float> energy(impl->numParticles);
+    impl->energyByParticle->download(energy.data(), true);
+    double total = 0.0;
+    for (float value : energy)
+        total += value;
+    return total;
+}
+
+void MetalCalcNonbondedForceKernel::copyParametersToContext(ContextImpl& context,
+                                                             const NonbondedForce& force,
+                                                             int firstParticle, int lastParticle,
+                                                             int firstException, int lastException) {
+    if (!impl->initialized)
+        throw OpenMMException("The Metal nonbonded kernel has not been initialized");
+    if (&getMetalContext(context) != impl->context)
+        throw OpenMMException("The Metal nonbonded kernel cannot be used with a different Context");
+    if (force.getNumParticles() != static_cast<int>(impl->numParticles))
+        throw OpenMMException("updateParametersInContext: The number of particles has changed");
+    if (force.getNumExceptions() != static_cast<int>(impl->numExceptions))
+        throw OpenMMException("updateParametersInContext: The number of exceptions has changed");
+    if (force.getNumParticleParameterOffsets() != 0 || force.getNumExceptionParameterOffsets() != 0)
+        throw OpenMMException("updateParametersInContext: Metal does not support NonbondedForce parameter offsets");
+
+    for (uint32_t i = 0; i < impl->numExceptions; i++) {
+        int particle1, particle2;
+        double chargeProd, sigma, epsilon;
+        force.getExceptionParameters(i, particle1, particle2, chargeProd, sigma, epsilon);
+        const uint32_t first = static_cast<uint32_t>(min(particle1, particle2));
+        const uint32_t second = static_cast<uint32_t>(max(particle1, particle2));
+        if (first != impl->hostExceptionParticles[i].particle1 ||
+                second != impl->hostExceptionParticles[i].particle2)
+            throw OpenMMException("updateParametersInContext: The set of particles in an exception has changed");
+    }
+
+    if (firstParticle <= lastParticle) {
+        if (firstParticle < 0 || lastParticle >= static_cast<int>(impl->numParticles))
+            throw OpenMMException("updateParametersInContext: The changed nonbonded particle range is invalid");
+        for (int i = firstParticle; i <= lastParticle; i++) {
+            double charge, sigma, epsilon;
+            force.getParticleParameters(i, charge, sigma, epsilon);
+            impl->hostParticleParameters[i] = {static_cast<float>(charge), static_cast<float>(sigma),
+                                               static_cast<float>(epsilon), 0.0f};
+        }
+        impl->particleParameters->uploadSubArray(impl->hostParticleParameters.data()+firstParticle,
+                firstParticle, lastParticle-firstParticle+1, true);
+    }
+    if (firstException <= lastException) {
+        if (firstException < 0 || lastException >= static_cast<int>(impl->numExceptions))
+            throw OpenMMException("updateParametersInContext: The changed nonbonded exception range is invalid");
+        for (int i = firstException; i <= lastException; i++) {
+            int particle1, particle2;
+            double chargeProd, sigma, epsilon;
+            force.getExceptionParameters(i, particle1, particle2, chargeProd, sigma, epsilon);
+            impl->hostExceptionParameters[i] = {static_cast<float>(chargeProd), static_cast<float>(sigma),
+                                                static_cast<float>(epsilon), 0.0f};
+        }
+        impl->exceptionParameters->uploadSubArray(impl->hostExceptionParameters.data()+firstException,
+                firstException, lastException-firstException+1, true);
+    }
+}
+
+void MetalCalcNonbondedForceKernel::getPMEParameters(double& alpha, int& nx, int& ny, int& nz) const {
+    (void) alpha;
+    (void) nx;
+    (void) ny;
+    (void) nz;
+    throw OpenMMException("getPMEParametersInContext: This Metal Context is not using PME or LJPME");
+}
+
+void MetalCalcNonbondedForceKernel::getLJPMEParameters(double& alpha, int& nx, int& ny, int& nz) const {
+    (void) alpha;
+    (void) nx;
+    (void) ny;
+    (void) nz;
+    throw OpenMMException("getLJPMEParametersInContext: This Metal Context is not using LJPME");
 }
 
 class MetalIntegrateVerletStepKernel::Impl {

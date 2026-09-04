@@ -111,6 +111,25 @@ private:
     std::unique_ptr<Impl> impl;
 };
 
+/** Native MSL implementation of NoCutoff Coulomb and Lennard-Jones interactions. */
+class MetalCalcNonbondedForceKernel : public CalcNonbondedForceKernel {
+public:
+    MetalCalcNonbondedForceKernel(std::string name, const Platform& platform, ContextImpl& context);
+    ~MetalCalcNonbondedForceKernel() override;
+    void initialize(const System& system, const NonbondedForce& force) override;
+    double execute(ContextImpl& context, bool includeForces, bool includeEnergy,
+                   bool includeDirect, bool includeReciprocal) override;
+    void copyParametersToContext(ContextImpl& context, const NonbondedForce& force,
+                                 int firstParticle, int lastParticle,
+                                 int firstException, int lastException) override;
+    void getPMEParameters(double& alpha, int& nx, int& ny, int& nz) const override;
+    void getLJPMEParameters(double& alpha, int& nx, int& ny, int& nz) const override;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl;
+};
+
 /** Native MSL implementation of unconstrained leapfrog Verlet integration. */
 class MetalIntegrateVerletStepKernel : public IntegrateVerletStepKernel {
 public:
