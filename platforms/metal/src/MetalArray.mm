@@ -253,6 +253,45 @@ void MetalArray::copySubArrayTo(MetalArray& destination, int sourceOffset, int d
     }
 }
 
+void MetalArray::clear(bool blocking) {
+    @autoreleasepool {
+        if (!isInitialized())
+            throw OpenMMException("Cannot clear an uninitialized Metal array");
+        size_t bytes = checkedByteCount(impl->size, impl->elementSize, "MetalArray clear");
+        if (bytes == 0)
+            return;
+        impl->queue->checkForErrors();
+
+        // On macOS, fillBuffer() requires every range boundary to be a
+        // multiple of four.  OpenMM's compute buffers satisfy that contract,
+        // including the 8-byte logical fixed-point elements.  Preserve the
+        // generic MetalArray byte contract with a staged fallback for a short
+        // trailing range that cannot be filled directly.
+        id<MTLBuffer> staging = nil;
+        if ((bytes & 3) != 0) {
+            staging = createStagingBuffer(impl->queue, bytes, "clearing "+impl->name);
+            memset(staging.contents, 0, bytes);
+        }
+
+        lock_guard<mutex> lock(impl->queue->submissionMutex);
+        id<MTLBuffer> buffer = impl->bufferState->getBuffer();
+        id<MTLCommandBuffer> command = impl->queue->makeCommandBuffer("clear "+impl->name);
+        id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
+        if (encoder == nil)
+            throw OpenMMException("Metal failed to create a blit encoder for clearing "+impl->name);
+        if (staging == nil)
+            [encoder fillBuffer:buffer range:NSMakeRange(0, bytes) value:0];
+        else
+            [encoder copyFromBuffer:staging
+                      sourceOffset:0
+                          toBuffer:buffer
+                 destinationOffset:0
+                              size:bytes];
+        [encoder endEncoding];
+        impl->queue->submit(command, blocking);
+    }
+}
+
 shared_ptr<MetalQueueState> MetalArrayAccess::getQueueState(const MetalArray& array) {
     return array.impl->queue;
 }

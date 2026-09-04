@@ -79,6 +79,12 @@ public:
     void copyTo(ArrayInterface& dest) const override;
     void copySubArrayTo(MetalArray& dest, int sourceOffset, int destOffset, int elements) const;
 
+    /**
+     * Set every logical byte in the array to zero.  The operation is encoded
+     * on this array's Metal command queue and is asynchronous by default.
+     */
+    void clear(bool blocking = false);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
