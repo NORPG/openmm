@@ -38,9 +38,8 @@ public:
     MetalArray& operator=(const MetalArray&) = delete;
 
     /**
-     * ArrayInterface hook.  Standalone arrays do not know how to obtain a
-     * MetalQueue from an arbitrary ComputeContext, so this overload throws.
-     * A Metal ComputeContext should call the overload accepting both objects.
+     * ArrayInterface hook.  The context must be a MetalContext; its default
+     * queue is used to initialize the array.
      */
     void initialize(ComputeContext& context, size_t size, int elementSize, const std::string& name) override;
     void initialize(MetalQueue& queue, size_t size, int elementSize, const std::string& name);

@@ -57,8 +57,8 @@ string propertyValue(const map<string, string>& properties, const string& name, 
 
 class MetalPlatform::PlatformData {
 public:
-    PlatformData(const System& system, size_t deviceIndex, const string& deviceName, const string& precision) :
-            context(new MetalContext(system, deviceIndex)) {
+    PlatformData(const System& system, ContextImpl& owner, size_t deviceIndex, const string& deviceName, const string& precision) :
+            context(new MetalContext(system, &owner, deviceIndex)) {
         propertyValues[MetalPlatform::MetalDeviceIndex()] = "0";
         propertyValues[MetalPlatform::MetalDeviceName()] = deviceName;
         propertyValues[MetalPlatform::MetalPrecision()] = precision;
@@ -199,7 +199,7 @@ void MetalPlatform::contextCreated(ContextImpl& context, const map<string, strin
                 throw OpenMMException("The first native Metal phase does not yet support periodic harmonic bonds");
         }
 
-        context.setPlatformData(new PlatformData(system, 0, actualName, precision));
+        context.setPlatformData(new PlatformData(system, context, 0, actualName, precision));
     }
 }
 

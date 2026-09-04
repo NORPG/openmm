@@ -13,6 +13,16 @@ API at runtime.  Both paths produce self-contained plugins and never read the
 source tree at runtime.  Runtime MSL compilation also remains available through
 `MetalProgram` for future generated kernels.
 
+`MetalContext` implements OpenMM's `ComputeContext` interface for the core
+single-device runtime surface: queues, arrays, events, runtime MSL programs,
+single-precision standard state buffers, and context bookkeeping.  This is a
+minimal foundation, not yet a claim that the existing Common kernel sources
+can be lowered to MSL.  Common sorting, FFT, integration, expression, bonded,
+and nonbonded utility objects are rejected explicitly until their Metal
+implementations are added.  Arrays also remain bound to the queue on which they
+were created, so switching an existing workload to a sibling queue is not yet
+supported.
+
 ## Phase 1 support boundary
 
 Phase 1 is a deliberately small, executable vertical slice:
@@ -47,6 +57,9 @@ compilation is controlled by `OPENMM_METAL_KERNEL_COMPILATION`:
 
 The focused test targets are:
 
+- `TestMetalComputeContext`: the minimal `ComputeContext` contract, standard
+  state-buffer ABI, `ComputeArray` interoperability, events, and runtime MSL
+  compilation through the generic compute interfaces
 - `TestMetalPlatform`: plugin registration, device properties, and the required
   OpenMM kernel-factory surface
 - `TestMetalRuntime`: buffers, transfers, queues, events, runtime MSL

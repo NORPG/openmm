@@ -26,6 +26,14 @@ add_custom_target(GenerateMetalTestKernelSources
 include_directories(BEFORE "${CMAKE_CURRENT_BINARY_DIR}")
 
 if(OPENMM_BUILD_SHARED_LIB)
+    add_executable(TestMetalComputeContext TestMetalComputeContext.cpp)
+    target_link_libraries(TestMetalComputeContext PRIVATE ${SHARED_TARGET})
+    set_target_properties(TestMetalComputeContext PROPERTIES
+        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
+        COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
+        MACOSX_DEPLOYMENT_TARGET "13.0")
+    add_test(NAME TestMetalComputeContext COMMAND TestMetalComputeContext)
+
     add_executable(TestMetalPlatform TestMetalPlatform.cpp)
     target_link_libraries(TestMetalPlatform PRIVATE ${SHARED_TARGET})
     set_target_properties(TestMetalPlatform PROPERTIES
@@ -55,6 +63,17 @@ if(OPENMM_BUILD_SHARED_LIB)
 endif()
 
 if(OPENMM_BUILD_STATIC_LIB)
+    add_executable(TestMetalComputeContextStatic TestMetalComputeContext.cpp)
+    target_link_libraries(TestMetalComputeContextStatic PRIVATE ${STATIC_TARGET})
+    target_compile_definitions(TestMetalComputeContextStatic PRIVATE
+        OPENMM_USE_STATIC_LIBRARIES
+        OPENMM_METAL_USE_STATIC_LIBRARIES)
+    set_target_properties(TestMetalComputeContextStatic PROPERTIES
+        LINK_FLAGS "${EXTRA_LINK_FLAGS}"
+        COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS}"
+        MACOSX_DEPLOYMENT_TARGET "13.0")
+    add_test(NAME TestMetalComputeContextStatic COMMAND TestMetalComputeContextStatic)
+
     add_executable(TestMetalPlatformStatic TestMetalPlatform.cpp)
     target_link_libraries(TestMetalPlatformStatic PRIVATE ${STATIC_TARGET})
     target_compile_definitions(TestMetalPlatformStatic PRIVATE

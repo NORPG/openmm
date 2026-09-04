@@ -40,8 +40,10 @@ int main() {
     try {
         @autoreleasepool {
             vector<MetalDeviceCaps> devices = MetalDeviceCaps::enumerate();
-            if (devices.empty())
-                throw OpenMMException("No Metal devices are visible");
+            if (devices.empty()) {
+                cout << "Test skipped: no Metal devices are visible" << endl;
+                return 0;
+            }
 
             MetalQueue queue;
             const MetalDeviceCaps& caps = queue.getDeviceCaps();

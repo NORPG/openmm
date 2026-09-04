@@ -13,9 +13,11 @@ kernel void integrateVerlet(device float4* positions [[buffer(0)]],
     const float inverseMass = inverseMasses[particle];
     if (inverseMass == 0.0f)
         return;
+    const float velocityMetadata = velocities[particle].w;
+    const float positionMetadata = positions[particle].w;
     float3 velocity = velocities[particle].xyz;
     velocity += stepSize*inverseMass*forces[particle].xyz;
     const float3 position = positions[particle].xyz+stepSize*velocity;
-    velocities[particle] = float4(velocity, 0.0f);
-    positions[particle] = float4(position, 0.0f);
+    velocities[particle] = float4(velocity, velocityMetadata);
+    positions[particle] = float4(position, positionMetadata);
 }

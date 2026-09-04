@@ -1,6 +1,7 @@
 #include "MetalProgram.h"
 #include "MetalArray.h"
 #include "MetalInternal.h"
+#include "openmm/common/ComputeArray.h"
 
 #import <dispatch/dispatch.h>
 
@@ -18,6 +19,14 @@ using namespace OpenMM::detail;
 using namespace std;
 
 namespace {
+
+MetalArray* unwrapMetalArray(ArrayInterface& value) {
+    ArrayInterface* candidate = &value;
+    ComputeArray* wrapper = dynamic_cast<ComputeArray*>(&value);
+    if (wrapper != NULL)
+        candidate = &wrapper->getArray();
+    return dynamic_cast<MetalArray*>(candidate);
+}
 
 NSString* makeNSString(const string& value, const string& description) {
     NSString* result = [[NSString alloc] initWithBytes:value.data()
@@ -402,7 +411,7 @@ void MetalKernel::execute(int threads, int blockSize) {
 
 void MetalKernel::addArrayArg(ArrayInterface& value) {
     lock_guard<mutex> lock(impl->argumentMutex);
-    MetalArray* array = dynamic_cast<MetalArray*>(&value);
+    MetalArray* array = unwrapMetalArray(value);
     if (array == NULL)
         throw OpenMMException("Metal kernel arguments must be MetalArray objects");
     if (!array->isInitialized())
@@ -438,7 +447,7 @@ void MetalKernel::setArrayArg(int index, ArrayInterface& value) {
     lock_guard<mutex> lock(impl->argumentMutex);
     if (index < 0 || static_cast<size_t>(index) >= impl->arguments.size())
         throw OpenMMException("Invalid argument index for Metal kernel "+impl->name);
-    MetalArray* array = dynamic_cast<MetalArray*>(&value);
+    MetalArray* array = unwrapMetalArray(value);
     if (array == NULL)
         throw OpenMMException("Metal kernel arguments must be MetalArray objects");
     if (!array->isInitialized())
