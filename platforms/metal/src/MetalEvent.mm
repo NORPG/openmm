@@ -1,6 +1,7 @@
 #include "MetalEvent.h"
 #include "MetalInternal.h"
 
+#include <limits>
 #include <mutex>
 
 using namespace OpenMM;
@@ -33,6 +34,8 @@ void MetalEvent::enqueue() {
         lock_guard<mutex> eventLock(impl->lock);
         impl->queue->checkForErrors();
         lock_guard<mutex> queueLock(impl->queue->submissionMutex);
+        if (impl->value == numeric_limits<uint64_t>::max())
+            throw OpenMMException("Metal event signal value overflow");
         id<MTLCommandBuffer> command = impl->queue->makeCommandBuffer("signal event");
         impl->value++;
         [command encodeSignalEvent:impl->event value:impl->value];
@@ -65,7 +68,7 @@ void MetalEvent::queueWait(ComputeQueue queue) {
         lock_guard<mutex> eventLock(impl->lock);
         if (impl->signalCommand == nil)
             throw OpenMMException("Cannot enqueue a wait for a MetalEvent before enqueue() has been called");
-        if (metalQueue->state->device != impl->queue->device)
+        if (metalQueue->state->caps.getRegistryId() != impl->queue->caps.getRegistryId())
             throw OpenMMException("MetalEvent cannot synchronize queues from different devices");
         metalQueue->state->checkForErrors();
         lock_guard<mutex> queueLock(metalQueue->state->submissionMutex);
