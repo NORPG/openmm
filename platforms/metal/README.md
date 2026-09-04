@@ -82,6 +82,14 @@ addition using only 32-bit operations.  `atomicAddFixedPoint()` is the public
 whole-value wrapper and deliberately returns `void`, since the two word updates
 do not form a linearizable 64-bit atomic operation.
 
+Ordinary signed 32-bit work counters use the separate
+`atomicFetchAddCounter32()` API from `counterAtomics.metal`.  It performs one
+relaxed atomic operation and returns the counter value from before that
+operation.  Counter code must not call the fixed-point limb helpers, and
+fixed-point code must not treat a counter return value as a coherent old
+Q32.32 value.  The relaxed operation reserves a unique counter value but does
+not publish other payload writes between threads.
+
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components
