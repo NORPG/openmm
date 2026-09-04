@@ -51,7 +51,9 @@ upload a host-sized zero array.  Queue ordering makes a following kernel or
 download observe the completed clear.
 
 GPU buffer copies preserve all 8 bytes of every logical element for Common's
-save/restore paths.
+save/restore paths.  Metal checkpoint version 2 likewise stores the complete
+padded long-force buffer.  The loader accepts legacy version 1 checkpoints and
+GPU-clears the buffer because those checkpoints contain no long-force payload.
 
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
