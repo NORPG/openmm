@@ -13,6 +13,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "MetalContext.h"
+#include "MetalFixedPoint.h"
 #include "MetalEvent.h"
 #include "MetalProgram.h"
 #include "openmm/OpenMMException.h"
