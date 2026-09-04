@@ -1,6 +1,7 @@
 #include "MetalArray.h"
 #include "MetalDeviceCaps.h"
 #include "MetalEvent.h"
+#include "MetalFixedPoint.h"
 #include "MetalProgram.h"
 #include "MetalTestKernelSources.h"
 #include "openmm/OpenMMException.h"
@@ -68,6 +69,35 @@ int main() {
             MetalArray directResult(queue, count, sizeof(float), "direct result");
             MetalArray argumentResult(queue, count, sizeof(float), "argument result");
             MetalArray copiedResult(queue, count, sizeof(float), "copied result");
+
+            // Verify the host {lo, hi} structure has the same element stride
+            // and word order as an MSL uint2 array.
+            const vector<MetalFixedPoint64Storage> fixedPointValues = {
+                {0x01234567u, 0x89abcdefu},
+                {0xfedcba98u, 0x76543210u},
+                {0x00000000u, 0xffffffffu}
+            };
+            MetalArray fixedPointStorage(queue, fixedPointValues.size(),
+                                         sizeof(MetalFixedPoint64Storage),
+                                         "logical 64-bit fixed-point storage");
+            MetalArray fixedPointWords(queue, 2*fixedPointValues.size(), sizeof(uint32_t),
+                                       "logical 64-bit fixed-point words");
+            fixedPointStorage.upload(fixedPointValues);
+            MetalProgram fixedPointProgram(queue, MetalTestKernelSources::fixedPointLayout);
+            shared_ptr<MetalKernel> inspectFixedPoint = fixedPointProgram.createMetalKernel(
+                    "inspectFixedPointLayout");
+            inspectFixedPoint->addArg(fixedPointStorage);
+            inspectFixedPoint->addArg(fixedPointWords);
+            inspectFixedPoint->addArg(static_cast<uint32_t>(fixedPointValues.size()));
+            inspectFixedPoint->execute(static_cast<int>(fixedPointValues.size()));
+            vector<uint32_t> downloadedFixedPointWords;
+            fixedPointWords.download(downloadedFixedPointWords);
+            for (size_t i = 0; i < fixedPointValues.size(); i++) {
+                if (downloadedFixedPointWords[2*i] != fixedPointValues[i].lo ||
+                        downloadedFixedPointWords[2*i+1] != fixedPointValues[i].hi)
+                    throw OpenMMException("logical 64-bit fixed-point host/MSL layout mismatch at index "+
+                                          to_string(i));
+            }
 
             // Nonblocking uploads followed by a subrange upload exercise blit
             // ordering before compute dispatch.

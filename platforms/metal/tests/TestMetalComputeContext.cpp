@@ -1,4 +1,5 @@
 #include "MetalContext.h"
+#include "MetalFixedPoint.h"
 #include "MetalPlatform.h"
 #include "MetalTestKernelSources.h"
 #include "openmm/System.h"
@@ -21,6 +22,13 @@ static_assert(is_base_of<ComputeContext, MetalContext>::value,
               "MetalContext must implement ComputeContext");
 
 namespace {
+
+void testFixedPointHostABI() {
+    ASSERT_EQUAL(8, static_cast<int>(sizeof(MetalFixedPoint64Storage)));
+    ASSERT_EQUAL(8, static_cast<int>(alignof(MetalFixedPoint64Storage)));
+    ASSERT_EQUAL(0, static_cast<int>(offsetof(MetalFixedPoint64Storage, lo)));
+    ASSERT_EQUAL(4, static_cast<int>(offsetof(MetalFixedPoint64Storage, hi)));
+}
 
 void testCoreContextSurface() {
     System system;
@@ -137,6 +145,7 @@ void testCoreContextSurface() {
 
 int main() {
     try {
+        testFixedPointHostABI();
         if (!MetalPlatform::isPlatformSupported()) {
             cout << "Test skipped: no supported Metal device is visible" << endl;
             return 0;

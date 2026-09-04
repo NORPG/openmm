@@ -23,6 +23,31 @@ implementations are added.  Arrays also remain bound to the queue on which they
 were created, so switching an existing workload to a sibling queue is not yet
 supported.
 
+## Logical 64-bit fixed-point storage ABI
+
+The future Common force accumulator uses an explicitly split logical 64-bit
+storage element.  Its host representation is `MetalFixedPoint64Storage`; the
+corresponding read-only MSL view is `uint2`:
+
+- each element is exactly 8 bytes and aligned to 8 bytes;
+- word 0 / `x` / `lo` stores bits 0-31;
+- word 1 / `y` / `hi` stores bits 32-63;
+- logical signed values use two's-complement bit representation; and
+- arrays have an 8-byte element stride with no inter-element padding.
+
+For the Common force buffer, component planes retain the existing logical
+indexing: `atom + axis*paddedNumAtoms`, where axes 0, 1, and 2 are x, y, and z.
+The byte offset of a logical component is therefore
+`8*(atom + axis*paddedNumAtoms)`.  The complete buffer contains
+`3*paddedNumAtoms` logical elements, or `24*paddedNumAtoms` bytes.
+
+The word order above is an ABI rule rather than an inference from byte
+endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
+using indices `2*i` and `2*i+1`.  They must not concurrently update components
+through a `uint2` view.  Read-only `uint2` access is permitted only after all
+atomic writers have completed.  This section defines storage and layout only;
+the two-word atomic-add algorithm and force-buffer routing are separate work.
+
 ## Current support boundary
 
 This is a deliberately small, executable vertical slice:
