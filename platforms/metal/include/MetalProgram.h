@@ -13,6 +13,7 @@
 #include "MetalKernel.h"
 #include "MetalQueue.h"
 #include "openmm/common/ComputeProgram.h"
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -25,10 +26,14 @@ struct MetalProgramOptions {
     int languageVersionMinor = 0;
 };
 
-/** A Metal library compiled from MSL source at runtime. */
+/** A Metal library compiled from MSL source or loaded from a precompiled metallib. */
 class OPENMM_EXPORT_METAL MetalProgram : public ComputeProgramImpl {
 public:
+    /** Compile a Metal library from MSL source at runtime. */
     MetalProgram(MetalQueue& queue, const std::string& source, const MetalProgramOptions& options = MetalProgramOptions());
+
+    /** Load a precompiled Metal library.  The input bytes are copied by this call. */
+    MetalProgram(MetalQueue& queue, const void* libraryData, size_t librarySize);
     ~MetalProgram();
 
     MetalProgram(const MetalProgram&) = delete;

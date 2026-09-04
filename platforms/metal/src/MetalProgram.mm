@@ -242,6 +242,23 @@ MetalProgram::MetalProgram(MetalQueue& queue, const string& source, const MetalP
     }
 }
 
+MetalProgram::MetalProgram(MetalQueue& queue, const void* libraryData, size_t librarySize) : impl(new Impl()) {
+    @autoreleasepool {
+        if (libraryData == NULL || librarySize == 0)
+            throw OpenMMException("Cannot load an empty Metal library");
+        queue.state->checkForErrors();
+        impl->queue = queue.state;
+        dispatch_data_t data = dispatch_data_create(libraryData, librarySize, NULL,
+                                                    DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        if (data == NULL)
+            throw OpenMMException("Unable to copy the precompiled Metal library data");
+        NSError* error = nil;
+        impl->library = [impl->queue->device newLibraryWithData:data error:&error];
+        if (impl->library == nil)
+            throw OpenMMException("Error loading precompiled Metal library: "+describeError(error));
+    }
+}
+
 MetalProgram::~MetalProgram() {
 }
 
