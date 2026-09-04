@@ -29,6 +29,79 @@ void testFixedPointHostABI() {
     ASSERT_EQUAL(4, static_cast<int>(offsetof(MetalFixedPoint64Storage, hi)));
 }
 
+void testLongForceBuffer() {
+    System system;
+    for (int i = 0; i < ComputeContext::TileSize+1; i++)
+        system.addParticle(1.0);
+    MetalContext context(system, NULL, 0);
+    ASSERT_EQUAL(2*ComputeContext::TileSize, context.getPaddedNumAtoms());
+
+    ArrayInterface& buffer = context.getLongForceBuffer();
+    const size_t paddedNumAtoms = static_cast<size_t>(context.getPaddedNumAtoms());
+    const size_t elementCount = 3*paddedNumAtoms;
+    ASSERT(buffer.isInitialized());
+    ASSERT(dynamic_cast<MetalArray*>(&buffer) != NULL);
+    ASSERT(&buffer == &context.getLongForceBuffer());
+    ASSERT(&buffer != &context.getFloatForceBuffer());
+    ASSERT(&buffer != &context.getForceBuffers());
+    ASSERT_EQUAL(elementCount, buffer.getSize());
+    ASSERT_EQUAL(static_cast<int>(sizeof(MetalFixedPoint64Storage)), buffer.getElementSize());
+    ASSERT_EQUAL(3*paddedNumAtoms*sizeof(MetalFixedPoint64Storage),
+                 buffer.getSize()*static_cast<size_t>(buffer.getElementSize()));
+    ASSERT(&buffer.getContext() == &context);
+
+    vector<MetalFixedPoint64Storage> values;
+    buffer.download(values);
+    for (const auto& value : values) {
+        ASSERT_EQUAL(0u, value.lo);
+        ASSERT_EQUAL(0u, value.hi);
+    }
+
+    vector<MetalFixedPoint64Storage> sentinels(elementCount);
+    for (size_t i = 0; i < sentinels.size(); i++) {
+        const uint32_t index = static_cast<uint32_t>(i);
+        sentinels[i] = {0x10203040u+0x01010101u*index,
+                        0x89abcdefu^(0x9e3779b9u*(index+1u))};
+    }
+    buffer.upload(sentinels);
+    buffer.download(values);
+    for (size_t i = 0; i < values.size(); i++) {
+        ASSERT_EQUAL(sentinels[i].lo, values[i].lo);
+        ASSERT_EQUAL(sentinels[i].hi, values[i].hi);
+    }
+
+    // Direct clear uses an ordered GPU blit over both 32-bit words of every
+    // logical 64-bit element.
+    context.clearBuffer(buffer);
+    buffer.download(values);
+    for (const auto& value : values) {
+        ASSERT_EQUAL(0u, value.lo);
+        ASSERT_EQUAL(0u, value.hi);
+    }
+
+    // Exercise the exact GPU-copy save/restore sequence used by Common
+    // kernels such as the Monte Carlo barostat rollback path.
+    ComputeArray savedLongForces;
+    savedLongForces.initialize<MetalFixedPoint64Storage>(context, elementCount,
+                                                         "saved long force buffer");
+    buffer.upload(sentinels);
+    buffer.copyTo(savedLongForces);
+    context.clearBuffer(buffer);
+    savedLongForces.copyTo(buffer);
+    buffer.download(values);
+    for (size_t i = 0; i < values.size(); i++) {
+        ASSERT_EQUAL(sentinels[i].lo, values[i].lo);
+        ASSERT_EQUAL(sentinels[i].hi, values[i].hi);
+    }
+
+    context.clearAutoclearBuffers();
+    buffer.download(values);
+    for (const auto& value : values) {
+        ASSERT_EQUAL(0u, value.lo);
+        ASSERT_EQUAL(0u, value.hi);
+    }
+}
+
 void testCoreContextSurface() {
     System system;
     system.addParticle(2.0);
@@ -138,15 +211,6 @@ kernel void addValue(device float* values [[buffer(0)]],
     ASSERT_EQUAL(1, context.getEnergyParamDerivNames().size());
     context.getEnergyParamDerivWorkspace()["lambda"] = 2.0;
     ASSERT_EQUAL_TOL(2.0, context.getEnergyParamDerivWorkspace()["lambda"], 1e-6);
-
-    bool rejected = false;
-    try {
-        context.getLongForceBuffer();
-    }
-    catch (const OpenMMException&) {
-        rejected = true;
-    }
-    ASSERT(rejected);
 }
 
 } // namespace
@@ -158,6 +222,7 @@ int main() {
             cout << "Test skipped: no supported Metal device is visible" << endl;
             return 0;
         }
+        testLongForceBuffer();
         testCoreContextSurface();
     }
     catch (const exception& e) {

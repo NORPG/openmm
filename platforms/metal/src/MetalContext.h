@@ -124,6 +124,7 @@ private:
     std::unique_ptr<MetalArray> positions;
     std::unique_ptr<MetalArray> velocities;
     std::unique_ptr<MetalArray> forces;
+    std::unique_ptr<MetalArray> longForceBuffer;
     std::unique_ptr<MetalArray> inverseMasses;
     std::unique_ptr<MetalArray> energyBuffer;
     std::unique_ptr<MetalArray> energyParamDerivBuffer;
