@@ -70,12 +70,24 @@ the complete two-word magnitude.  Kernels must not reconstruct a negative value
 by separately converting and adding its signed high word and unsigned low word:
 that loses small negative fractions and can double-round larger values.
 
+`atomicAddFixedPointLowWord()` binds the logical buffer as scalar
+`device atomic_uint` words and uses `atomic_fetch_add_explicit()` with
+`memory_order_relaxed` on word `2*i`.  It returns the previous low word for a
+later carry calculation.  `computeFixedPointCarry()` compares the modulo-2^32
+low-word result with that previous value and returns the carry-out as `0u` or
+`1u`.  `atomicAddFixedPointHighWord()` adds the high-word addend plus that carry
+to word `2*i+1` with another relaxed 32-bit atomic operation, skipping the RMW
+when the combined addend is zero.  Together these helpers implement modulo-2^64
+addition using only 32-bit operations.  `atomicAddFixedPoint()` is the public
+whole-value wrapper and deliberately returns `void`, since the two word updates
+do not form a linearizable 64-bit atomic operation.
+
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components
 through a `uint2` view.  Read-only `uint2` access is permitted only after all
-atomic writers have completed.  The two-word atomic-add algorithm and routing
-Common force producers into this buffer remain separate work.
+atomic writers have completed.  Routing Common force producers into this
+buffer remains separate work.
 
 ## Current support boundary
 

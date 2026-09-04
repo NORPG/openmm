@@ -6,6 +6,7 @@
 #include "openmm/internal/AssertionUtilities.h"
 #include "openmm/internal/ThreadPool.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -72,6 +73,23 @@ void testFixedPointHelpers(MetalContext& context) {
         {1.5f*unit, 0x00000001u, 0x00000000u, unit},
         {-1.5f*unit, 0xffffffffu, 0xffffffffu, -unit}
     };
+    struct CarryCase {
+        uint32_t previousLowWord;
+        uint32_t lowWordAddend;
+        uint32_t expectedCarry;
+    };
+    const vector<CarryCase> carryCases = {
+        {0x00000000u, 0x00000000u, 0u},
+        {0xffffffffu, 0x00000000u, 0u},
+        {0x00000000u, 0x00000001u, 0u},
+        {0xfffffffeu, 0x00000001u, 0u},
+        {0xffffffffu, 0x00000001u, 1u},
+        {0x00000000u, 0xffffffffu, 0u},
+        {0x00000001u, 0xffffffffu, 1u},
+        {0x7fffffffu, 0x80000000u, 0u},
+        {0x80000000u, 0x80000000u, 1u},
+        {0xffffffffu, 0xffffffffu, 1u}
+    };
 
     const string source = R"MSL(
 kernel void convertFixedPointHelpers(device const float* input [[buffer(0)]],
@@ -110,6 +128,44 @@ kernel void loadFixedPointPlanes(device const uint2* input [[buffer(0)]],
                                  uint index [[thread_position_in_grid]]) {
     if (index == 0u)
         output[0] = float4(loadFixedPoint3(input, atom, paddedNumAtoms), 0.0f);
+}
+
+kernel void computeFixedPointCarries(
+        device const uint* previousLowWords [[buffer(0)]],
+        device const uint* lowWordAddends [[buffer(1)]],
+        device uint* carries [[buffer(2)]],
+        constant uint& count [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index < count)
+        carries[index] = computeFixedPointCarry(previousLowWords[index],
+                                                lowWordAddends[index]);
+}
+
+kernel void addFixedPointWordsAtomically(
+        device atomic_uint* words [[buffer(0)]],
+        device uint* previousLowWords [[buffer(1)]],
+        device uint* carries [[buffer(2)]],
+        constant uint& logicalIndex [[buffer(3)]],
+        constant uint& lowWordAddend [[buffer(4)]],
+        constant uint& highWordAddend [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+    threadgroup_barrier(mem_flags::mem_none);
+    const uint previousLowWord = atomicAddFixedPointLowWord(words, logicalIndex,
+                                                            lowWordAddend);
+    const uint carry = computeFixedPointCarry(previousLowWord, lowWordAddend);
+    atomicAddFixedPointHighWord(words, logicalIndex, highWordAddend, carry);
+    previousLowWords[index] = previousLowWord;
+    carries[index] = carry;
+}
+
+kernel void addFixedPointAtomically(
+        device atomic_uint* words [[buffer(0)]],
+        constant uint& logicalIndex [[buffer(1)]],
+        constant uint& lowWordAddend [[buffer(2)]],
+        constant uint& highWordAddend [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    atomicAddFixedPoint(words, logicalIndex,
+                        uint2(lowWordAddend, highWordAddend));
 }
 )MSL";
     ComputeProgram program = context.compileProgram(source);
@@ -152,6 +208,35 @@ kernel void loadFixedPointPlanes(device const uint2* input [[buffer(0)]],
         ASSERT_EQUAL(cases[i].hi, splitWords[i].hi);
         ASSERT_EQUAL(cases[i].reconstructed, reconstructedValues[i]);
     }
+
+    vector<uint32_t> previousLowWordValues;
+    vector<uint32_t> lowWordAddendValues;
+    for (const auto& test : carryCases) {
+        previousLowWordValues.push_back(test.previousLowWord);
+        lowWordAddendValues.push_back(test.lowWordAddend);
+    }
+    ComputeArray previousLowWordInput;
+    ComputeArray lowWordAddendInput;
+    ComputeArray carryOutput;
+    previousLowWordInput.initialize<uint32_t>(context, carryCases.size(),
+                                               "carry previous low words");
+    lowWordAddendInput.initialize<uint32_t>(context, carryCases.size(),
+                                             "carry low-word addends");
+    carryOutput.initialize<uint32_t>(context, carryCases.size(),
+                                     "fixed-point carry output");
+    previousLowWordInput.upload(previousLowWordValues);
+    lowWordAddendInput.upload(lowWordAddendValues);
+    ComputeKernel computeCarries = program->createKernel("computeFixedPointCarries");
+    const uint32_t carryCount = static_cast<uint32_t>(carryCases.size());
+    computeCarries->addArg(previousLowWordInput);
+    computeCarries->addArg(lowWordAddendInput);
+    computeCarries->addArg(carryOutput);
+    computeCarries->addArg(carryCount);
+    computeCarries->execute(carryCount);
+    vector<uint32_t> carryResults;
+    carryOutput.download(carryResults);
+    for (size_t i = 0; i < carryCases.size(); i++)
+        ASSERT_EQUAL(carryCases[i].expectedCarry, carryResults[i]);
 
     vector<MetalFixedPoint64Storage> rawValues = {
         {0x00000000u, 0x00000000u},
@@ -222,6 +307,105 @@ kernel void loadFixedPointPlanes(device const uint2* input [[buffer(0)]],
     ArrayInterface& longForces = context.getLongForceBuffer();
     const uint32_t paddedNumAtoms = static_cast<uint32_t>(context.getPaddedNumAtoms());
     const uint32_t atom = 17;
+
+    const uint32_t atomicThreadCount = 32768;
+    const uint32_t atomicIndex = paddedNumAtoms+atom;
+    const uint32_t initialLowWord = 0xff000001u;
+    const uint32_t lowWordAddend = 0x00010001u;
+    const uint32_t initialHighWord = 0x00001000u;
+    const uint32_t highWordAddend = 0xffffffffu;
+    const MetalFixedPoint64Storage untouchedSentinel = {0x13579bdfu, 0x2468ace0u};
+    vector<MetalFixedPoint64Storage> atomicValues(longForces.getSize(),
+                                                  untouchedSentinel);
+    atomicValues[atomicIndex] = {initialLowWord, initialHighWord};
+    longForces.upload(atomicValues);
+
+    ComputeArray previousLowWords;
+    ComputeArray atomicCarries;
+    previousLowWords.initialize<uint32_t>(context, atomicThreadCount,
+                                          "atomic low-word return values");
+    atomicCarries.initialize<uint32_t>(context, atomicThreadCount,
+                                       "atomic low-word carries");
+    ComputeKernel addWords = program->createKernel("addFixedPointWordsAtomically");
+    addWords->addArg(longForces);
+    addWords->addArg(previousLowWords);
+    addWords->addArg(atomicCarries);
+    addWords->addArg(atomicIndex);
+    addWords->addArg(lowWordAddend);
+    addWords->addArg(highWordAddend);
+    addWords->execute(atomicThreadCount, min(256, addWords->getMaxBlockSize()));
+
+    vector<uint32_t> actualPreviousLowWords;
+    vector<uint32_t> actualCarries;
+    previousLowWords.download(actualPreviousLowWords);
+    atomicCarries.download(actualCarries);
+    vector<uint32_t> expectedPreviousLowWords(atomicThreadCount);
+    uint32_t expectedFinalLowWord = initialLowWord;
+    uint32_t expectedCarryCount = 0u;
+    for (uint32_t i = 0; i < atomicThreadCount; i++) {
+        expectedPreviousLowWords[i] = expectedFinalLowWord;
+        const uint64_t sum = static_cast<uint64_t>(expectedFinalLowWord)+lowWordAddend;
+        expectedCarryCount += static_cast<uint32_t>(sum >> 32);
+        expectedFinalLowWord = static_cast<uint32_t>(sum);
+    }
+    uint32_t actualCarryCount = 0u;
+    for (uint32_t i = 0; i < atomicThreadCount; i++) {
+        const uint64_t sum = static_cast<uint64_t>(actualPreviousLowWords[i])+lowWordAddend;
+        const uint32_t expectedCarry = static_cast<uint32_t>(sum >> 32);
+        ASSERT_EQUAL(expectedCarry, actualCarries[i]);
+        actualCarryCount += actualCarries[i];
+    }
+    ASSERT_EQUAL(expectedCarryCount, actualCarryCount);
+    ASSERT_EQUAL(1, actualCarryCount);
+    const uint64_t initialValue = (static_cast<uint64_t>(initialHighWord) << 32) |
+                                  initialLowWord;
+    const uint64_t addendValue = (static_cast<uint64_t>(highWordAddend) << 32) |
+                                 lowWordAddend;
+    const uint64_t expectedFinalValue = initialValue+
+            static_cast<uint64_t>(atomicThreadCount)*addendValue;
+    ASSERT_EQUAL(static_cast<uint32_t>(expectedFinalValue), expectedFinalLowWord);
+    const uint32_t expectedFinalHighWord = static_cast<uint32_t>(expectedFinalValue >> 32);
+    ASSERT_EQUAL(0xffff9001u, expectedFinalHighWord);
+    sort(actualPreviousLowWords.begin(), actualPreviousLowWords.end());
+    sort(expectedPreviousLowWords.begin(), expectedPreviousLowWords.end());
+    for (uint32_t i = 0; i < atomicThreadCount; i++)
+        ASSERT_EQUAL(expectedPreviousLowWords[i], actualPreviousLowWords[i]);
+
+    vector<MetalFixedPoint64Storage> atomicResults;
+    longForces.download(atomicResults);
+    for (size_t i = 0; i < atomicResults.size(); i++) {
+        if (i == atomicIndex) {
+            ASSERT_EQUAL(expectedFinalLowWord, atomicResults[i].lo);
+            ASSERT_EQUAL(expectedFinalHighWord, atomicResults[i].hi);
+        }
+        else {
+            ASSERT_EQUAL(untouchedSentinel.lo, atomicResults[i].lo);
+            ASSERT_EQUAL(untouchedSentinel.hi, atomicResults[i].hi);
+        }
+    }
+
+    // The whole-value fixed-point API intentionally has no return value.  Its
+    // final result must match the individually tested low/carry/high helpers.
+    longForces.upload(atomicValues);
+    ComputeKernel addFixedPoint = program->createKernel("addFixedPointAtomically");
+    addFixedPoint->addArg(longForces);
+    addFixedPoint->addArg(atomicIndex);
+    addFixedPoint->addArg(lowWordAddend);
+    addFixedPoint->addArg(highWordAddend);
+    addFixedPoint->execute(atomicThreadCount,
+                           min(256, addFixedPoint->getMaxBlockSize()));
+    longForces.download(atomicResults);
+    for (size_t i = 0; i < atomicResults.size(); i++) {
+        if (i == atomicIndex) {
+            ASSERT_EQUAL(expectedFinalLowWord, atomicResults[i].lo);
+            ASSERT_EQUAL(expectedFinalHighWord, atomicResults[i].hi);
+        }
+        else {
+            ASSERT_EQUAL(untouchedSentinel.lo, atomicResults[i].lo);
+            ASSERT_EQUAL(untouchedSentinel.hi, atomicResults[i].hi);
+        }
+    }
+
     vector<MetalFixedPoint64Storage> planeValues(longForces.getSize(), {0u, 0u});
     planeValues[atom] = {0x40000000u, 0x00000001u};
     planeValues[atom+paddedNumAtoms] = {0x80000000u, 0xfffffffeu};
