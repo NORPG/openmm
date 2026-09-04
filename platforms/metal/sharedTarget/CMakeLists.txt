@@ -1,0 +1,26 @@
+set_source_files_properties(${METAL_KERNELS_CPP} ${METAL_KERNELS_H}
+    PROPERTIES GENERATED TRUE)
+add_library(${SHARED_TARGET} SHARED
+    ${SOURCE_FILES}
+    ${SOURCE_INCLUDE_FILES}
+    ${API_ABS_INCLUDE_FILES})
+add_dependencies(${SHARED_TARGET} GenerateMetalKernelSources)
+
+target_link_libraries(${SHARED_TARGET}
+    PUBLIC
+        ${OPENMM_LIBRARY_NAME}
+    PRIVATE
+        ${METAL_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK})
+target_compile_options(${SHARED_TARGET} PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX,OBJCXX>:SHELL:${EXTRA_COMPILE_FLAGS}>"
+    "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+target_compile_definitions(${SHARED_TARGET} PRIVATE
+    OPENMM_METAL_BUILDING_SHARED_LIBRARY)
+set_target_properties(${SHARED_TARGET} PROPERTIES
+    LINK_FLAGS "${EXTRA_LINK_FLAGS}")
+
+install(TARGETS ${SHARED_TARGET}
+    RUNTIME DESTINATION lib/plugins
+    LIBRARY DESTINATION lib/plugins
+    ARCHIVE DESTINATION lib/plugins)

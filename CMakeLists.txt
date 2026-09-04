@@ -357,6 +357,22 @@ IF(OPENMM_BUILD_HIP_LIB)
     ADD_SUBDIRECTORY(platforms/hip)
 ENDIF(OPENMM_BUILD_HIP_LIB)
 
+# Metal platform
+
+# The native Metal backend is currently an experimental, explicitly enabled
+# platform.  Keeping it off by default prevents an incomplete backend from
+# changing the set of plugins installed by established OpenMM builds.
+SET(OPENMM_BUILD_METAL_LIB OFF CACHE BOOL "Build the experimental native Metal platform")
+IF(OPENMM_BUILD_METAL_LIB)
+    IF(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        MESSAGE(FATAL_ERROR "OPENMM_BUILD_METAL_LIB is only supported on macOS")
+    ENDIF()
+    IF(NOT ARM)
+        MESSAGE(FATAL_ERROR "OPENMM_BUILD_METAL_LIB currently requires Apple Silicon")
+    ENDIF()
+    ADD_SUBDIRECTORY(platforms/metal)
+ENDIF(OPENMM_BUILD_METAL_LIB)
+
 # Common compute files
 
 SET(OPENMM_BUILD_COMMON OFF CACHE BOOL "Build common files even if CUDA or OpenCL platforms are not built")
