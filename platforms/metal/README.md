@@ -55,6 +55,21 @@ save/restore paths.  Metal checkpoint version 2 likewise stores the complete
 padded long-force buffer.  The loader accepts legacy version 1 checkpoints and
 GPU-clears the buffer because those checkpoints contain no long-force payload.
 
+`src/kernels/fixedPoint.metal` defines the Metal 3.0 helper contract used by
+runtime-generated kernels.  `MetalContext::compileProgram()` prepends this
+source automatically.  `realToFixedPoint()` implements
+`trunc(value*2^32)` for finite binary32 values in `[-2^31, 2^31)`, returning
+the two's-complement result as `uint2(lo, hi)`.  `splitFixedPoint()` exposes the
+same word assembly operation for already-decomposed values.  `loadFixedPoint()`
+loads the raw words, while `reconstructSignedFixedPoint()` and
+`loadSignedFixedPoint()` convert a signed Q32.32 value back to binary32.
+`loadFixedPoint3()` applies the component-plane indexing described above.
+
+Signed reconstruction performs one round-to-nearest, ties-to-even operation on
+the complete two-word magnitude.  Kernels must not reconstruct a negative value
+by separately converting and adding its signed high word and unsigned low word:
+that loses small negative fractions and can double-round larger values.
+
 The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components

@@ -15,6 +15,7 @@
 #include "MetalContext.h"
 #include "MetalFixedPoint.h"
 #include "MetalEvent.h"
+#include "MetalKernelSources.h"
 #include "MetalProgram.h"
 #include "openmm/OpenMMException.h"
 #include "openmm/common/ComputeArray.h"
@@ -299,7 +300,8 @@ ComputeSort MetalContext::createSort(ComputeSortImpl::SortTrait* trait, unsigned
 }
 
 ComputeProgram MetalContext::compileProgram(const string source, const map<string, string>& defines) {
-    return ComputeProgram(new MetalProgram(getCurrentMetalQueue(), addDefines(source, defines)));
+    const string completeSource = MetalKernelSources::fixedPoint+"\n"+addDefines(source, defines);
+    return ComputeProgram(new MetalProgram(getCurrentMetalQueue(), completeSource));
 }
 
 int MetalContext::computeThreadBlockSize(double memory) const {
