@@ -7,9 +7,11 @@
 #include "openmm/internal/ThreadPool.h"
 
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -95,6 +97,37 @@ void testLongForceBuffer() {
     }
 
     context.clearAutoclearBuffers();
+    buffer.download(values);
+    for (const auto& value : values) {
+        ASSERT_EQUAL(0u, value.lo);
+        ASSERT_EQUAL(0u, value.hi);
+    }
+
+    // Version 2 checkpoints preserve the complete padded long force buffer.
+    buffer.upload(sentinels);
+    stringstream checkpoint(ios_base::in | ios_base::out | ios_base::binary);
+    context.createCheckpoint(checkpoint);
+    context.clearBuffer(buffer);
+    checkpoint.seekg(0);
+    context.loadCheckpoint(checkpoint);
+    buffer.download(values);
+    for (size_t i = 0; i < values.size(); i++) {
+        ASSERT_EQUAL(sentinels[i].lo, values[i].lo);
+        ASSERT_EQUAL(sentinels[i].hi, values[i].hi);
+    }
+
+    // New readers remain compatible with version 1 checkpoints, which have
+    // no long force payload.  Loading one must clear pre-existing scratch data.
+    string legacyCheckpointData = checkpoint.str();
+    const size_t longForceBytes = elementCount*sizeof(MetalFixedPoint64Storage);
+    ASSERT(legacyCheckpointData.size() >= 2*sizeof(uint32_t)+longForceBytes);
+    const uint32_t legacyVersion = 1;
+    memcpy(&legacyCheckpointData[sizeof(uint32_t)], &legacyVersion, sizeof(legacyVersion));
+    legacyCheckpointData.resize(legacyCheckpointData.size()-longForceBytes);
+    buffer.upload(sentinels);
+    stringstream legacyCheckpoint(legacyCheckpointData,
+                                  ios_base::in | ios_base::out | ios_base::binary);
+    context.loadCheckpoint(legacyCheckpoint);
     buffer.download(values);
     for (const auto& value : values) {
         ASSERT_EQUAL(0u, value.lo);

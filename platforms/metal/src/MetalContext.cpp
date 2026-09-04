@@ -34,7 +34,8 @@ using namespace std;
 namespace {
 
 const uint32_t checkpointMagic = 0x4d544c31; // "MTL1"
-const uint32_t checkpointVersion = 1;
+const uint32_t checkpointVersion = 2;
+const uint32_t oldestSupportedCheckpointVersion = 1;
 
 template <class T>
 void writeValue(ostream& stream, const T& value) {
@@ -524,9 +525,11 @@ void MetalContext::createCheckpoint(ostream& stream) const {
     vector<MetalFloat4> positionData;
     vector<MetalFloat4> velocityData;
     vector<MetalFloat4> forceData;
+    vector<MetalFixedPoint64Storage> longForceData;
     positions->download(positionData);
     velocities->download(velocityData);
     forces->download(forceData);
+    longForceBuffer->download(longForceData);
     positionData.resize(numAtoms);
     velocityData.resize(numAtoms);
     forceData.resize(numAtoms);
@@ -545,6 +548,9 @@ void MetalContext::createCheckpoint(ostream& stream) const {
         stream.write(reinterpret_cast<const char*>(velocityData.data()), velocityData.size()*sizeof(MetalFloat4));
         stream.write(reinterpret_cast<const char*>(forceData.data()), forceData.size()*sizeof(MetalFloat4));
     }
+    if (!longForceData.empty())
+        stream.write(reinterpret_cast<const char*>(longForceData.data()),
+                     longForceData.size()*sizeof(MetalFixedPoint64Storage));
     if (!stream)
         throw OpenMMException("Error writing a Metal checkpoint");
 }
@@ -555,20 +561,30 @@ void MetalContext::loadCheckpoint(istream& stream) {
     readValue(stream, magic);
     readValue(stream, version);
     readValue(stream, particleCount);
-    if (magic != checkpointMagic || version != checkpointVersion)
+    if (magic != checkpointMagic || version < oldestSupportedCheckpointVersion || version > checkpointVersion)
         throw OpenMMException("This is not a supported Metal checkpoint");
     if (particleCount != numAtoms)
         throw OpenMMException("The Metal checkpoint contains a different number of particles");
-    readValue(stream, time);
-    readValue(stream, stepCount);
-    stream.read(reinterpret_cast<char*>(boxVectors), sizeof(boxVectors));
+    double checkpointTime;
+    long long checkpointStepCount;
+    Vec3 checkpointBoxVectors[3];
+    readValue(stream, checkpointTime);
+    readValue(stream, checkpointStepCount);
+    stream.read(reinterpret_cast<char*>(checkpointBoxVectors), sizeof(checkpointBoxVectors));
     vector<MetalFloat4> positionData(paddedNumAtoms, {0.0f, 0.0f, 0.0f, 0.0f});
     vector<MetalFloat4> velocityData(paddedNumAtoms, {0.0f, 0.0f, 0.0f, 0.0f});
     vector<MetalFloat4> forceData(paddedNumAtoms, {0.0f, 0.0f, 0.0f, 0.0f});
+    vector<MetalFixedPoint64Storage> longForceData;
     if (numAtoms > 0) {
         stream.read(reinterpret_cast<char*>(positionData.data()), numAtoms*sizeof(MetalFloat4));
         stream.read(reinterpret_cast<char*>(velocityData.data()), numAtoms*sizeof(MetalFloat4));
         stream.read(reinterpret_cast<char*>(forceData.data()), numAtoms*sizeof(MetalFloat4));
+    }
+    if (version >= 2) {
+        longForceData.resize(longForceBuffer->getSize());
+        if (!longForceData.empty())
+            stream.read(reinterpret_cast<char*>(longForceData.data()),
+                        longForceData.size()*sizeof(MetalFixedPoint64Storage));
     }
     if (!stream)
         throw OpenMMException("Error reading a Metal checkpoint");
@@ -579,7 +595,17 @@ void MetalContext::loadCheckpoint(istream& stream) {
         positionData[i].w = charges[i];
         velocityData[i].w = inverseMassValues[i];
     }
+    time = checkpointTime;
+    stepCount = checkpointStepCount;
+    for (int i = 0; i < 3; i++)
+        boxVectors[i] = checkpointBoxVectors[i];
     positions->upload(positionData);
     velocities->upload(velocityData);
     forces->upload(forceData);
+    if (version >= 2)
+        longForceBuffer->upload(longForceData);
+    else
+        // Version 1 predates the long force payload.  Clear it instead of
+        // retaining unrelated scratch data from before the restore.
+        longForceBuffer->clear(true);
 }
