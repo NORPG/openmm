@@ -25,6 +25,9 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.                                     *
  * -------------------------------------------------------------------------- */
 
+#include "MetalContext.h"
+#include "MetalFixedPoint.h"
+#include "MetalKernels.h"
 #include "MetalPlatform.h"
 #include "ReferencePlatform.h"
 #include "openmm/Context.h"
@@ -39,6 +42,7 @@
 #include "openmm/internal/AssertionUtilities.h"
 
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <map>
@@ -67,6 +71,9 @@ public:
     }
     bool kineticEnergyRequiresForce() const override {
         return false;
+    }
+    ContextImpl& getContextImpl() {
+        return *context;
     }
 };
 
@@ -123,6 +130,109 @@ void testHarmonicBondAndVerlet(MetalPlatform& platform) {
     ASSERT_EQUAL_VEC(Vec3(-0.01, 0, 0), afterStep.getVelocities()[1], STATE_TOL);
     ASSERT_EQUAL_TOL(stepSize, afterStep.getTime(), STATE_TOL);
     ASSERT_EQUAL(1, afterStep.getStepCount());
+}
+
+void testLogical64ForceConsumers(MetalPlatform& platform) {
+    const int numParticles = ComputeContext::TileSize+1;
+    System system;
+    for (int i = 0; i < numParticles; i++)
+        system.addParticle(i == 1 ? 0.0 : (i%2 == 0 ? 2.0 : 4.0));
+    const double stepSize = 0.125;
+    EnergyOnlyVerletIntegrator integrator(stepSize);
+    Context context(system, integrator, platform);
+    ContextImpl& contextImpl = integrator.getContextImpl();
+    MetalContext& metal = MetalPlatform::getMetalContext(contextImpl);
+    const int paddedNumAtoms = metal.getPaddedNumAtoms();
+    ASSERT(paddedNumAtoms > numParticles);
+
+    vector<MetalFloat4> positions(paddedNumAtoms, {91.0f, 92.0f, 93.0f, 94.0f});
+    vector<MetalFloat4> velocities(paddedNumAtoms, {95.0f, 96.0f, 97.0f, 98.0f});
+    vector<Vec3> expectedForces(numParticles);
+    vector<MetalFixedPoint64Storage> longForces(3*paddedNumAtoms, {0x98765432u, 0x12345678u});
+    for (int i = 0; i < numParticles; i++) {
+        positions[i] = {0.125f*i, -0.25f*i, 0.5f*i, 100.0f+i};
+        velocities[i] = {0.25f*i, -0.125f*i, 0.0625f*i, 200.0f+i};
+        expectedForces[i] = Vec3(i+0.25, -0.5*i-1.5, 0.25*i+0.75);
+        if (i == 0) {
+            // These values disappear if the low word is ignored, and their
+            // updates remain exactly representable in single precision.
+            expectedForces[i][0] = ldexp(1.0, -32);
+            expectedForces[i][1] = -ldexp(1.0, -32);
+        }
+        for (int axis = 0; axis < 3; axis++) {
+            const int64_t raw = static_cast<int64_t>(ldexp(expectedForces[i][axis], 32));
+            const uint64_t bits = static_cast<uint64_t>(raw);
+            longForces[i+axis*paddedNumAtoms] = {
+                static_cast<uint32_t>(bits), static_cast<uint32_t>(bits >> 32)
+            };
+        }
+    }
+    metal.getPositions().upload(positions);
+    metal.getVelocities().upload(velocities);
+    metal.getLongForceBuffer().upload(longForces);
+    const vector<MetalFloat4> unrelatedFloatForces(paddedNumAtoms,
+                                                   {700.0f, -800.0f, 900.0f, 1000.0f});
+    metal.getFloatForceBuffer().upload(unrelatedFloatForces);
+
+    // Invoke the production kernels directly: an integrator.step() or a
+    // State::Forces request would recompute forces and hide a stale consumer.
+    MetalIntegrateVerletStepKernel verlet(IntegrateVerletStepKernel::Name(), platform, contextImpl);
+    verlet.initialize(system, integrator);
+    MetalUpdateStateDataKernel stateData(UpdateStateDataKernel::Name(), platform);
+    stateData.initialize(system);
+    vector<Vec3> downloadedForces;
+    stateData.getForces(contextImpl, downloadedForces);
+    ASSERT_EQUAL(numParticles, downloadedForces.size());
+    for (int i = 0; i < numParticles; i++)
+        for (int axis = 0; axis < 3; axis++)
+            ASSERT_EQUAL(expectedForces[i][axis], downloadedForces[i][axis]);
+
+    const double timeShift = 0.5*stepSize;
+    vector<Vec3> shiftedVelocities;
+    stateData.computeShiftedVelocities(contextImpl, timeShift, shiftedVelocities);
+    ASSERT_EQUAL(numParticles, shiftedVelocities.size());
+    double expectedKineticEnergy = 0.0;
+    for (int i = 0; i < numParticles; i++) {
+        const double mass = system.getParticleMass(i);
+        Vec3 expected(velocities[i].x, velocities[i].y, velocities[i].z);
+        if (mass != 0.0) {
+            expected += expectedForces[i]*(timeShift/mass);
+            expectedKineticEnergy += 0.5*mass*expected.dot(expected);
+        }
+        for (int axis = 0; axis < 3; axis++)
+            ASSERT_EQUAL(expected[axis], shiftedVelocities[i][axis]);
+    }
+    ASSERT_EQUAL_TOL(expectedKineticEnergy, verlet.computeKineticEnergy(contextImpl, integrator), 1e-14);
+
+    verlet.execute(contextImpl, integrator);
+    vector<MetalFloat4> actualPositions, actualVelocities;
+    metal.getPositions().download(actualPositions);
+    metal.getVelocities().download(actualVelocities);
+    for (int i = 0; i < paddedNumAtoms; i++) {
+        Vec3 expectedPosition(positions[i].x, positions[i].y, positions[i].z);
+        Vec3 expectedVelocity(velocities[i].x, velocities[i].y, velocities[i].z);
+        if (i < numParticles && system.getParticleMass(i) != 0.0) {
+            expectedVelocity += expectedForces[i]*(stepSize/system.getParticleMass(i));
+            expectedPosition += expectedVelocity*stepSize;
+        }
+        const Vec3 actualPosition(actualPositions[i].x, actualPositions[i].y, actualPositions[i].z);
+        const Vec3 actualVelocity(actualVelocities[i].x, actualVelocities[i].y, actualVelocities[i].z);
+        for (int axis = 0; axis < 3; axis++) {
+            ASSERT_EQUAL(expectedPosition[axis], actualPosition[axis]);
+            ASSERT_EQUAL(expectedVelocity[axis], actualVelocity[axis]);
+        }
+        ASSERT_EQUAL(positions[i].w, actualPositions[i].w);
+        ASSERT_EQUAL(velocities[i].w, actualVelocities[i].w);
+    }
+    ASSERT_EQUAL(stepSize, metal.getTime());
+    ASSERT_EQUAL(1, metal.getStepCount());
+
+    vector<MetalFixedPoint64Storage> forcesAfter;
+    metal.getLongForceBuffer().download(forcesAfter);
+    for (size_t i = 0; i < longForces.size(); i++) {
+        ASSERT_EQUAL(longForces[i].lo, forcesAfter[i].lo);
+        ASSERT_EQUAL(longForces[i].hi, forcesAfter[i].hi);
+    }
 }
 
 void testMultipleBondsWithSharedParticle(MetalPlatform& platform) {
@@ -250,15 +360,27 @@ void testEnergyOnlyPreservesForces(MetalPlatform& platform) {
     context.setVelocities({Vec3(0, 0, 0), Vec3(0, 0, 0)});
 
     State forcesBefore = context.getState(State::Forces);
+    MetalContext& metal = MetalPlatform::getMetalContext(integrator.getContextImpl());
+    vector<MetalFixedPoint64Storage> longForcesBefore;
+    metal.getLongForceBuffer().download(longForcesBefore);
     State energyOnly = context.getState(State::Energy);
     ASSERT_EQUAL_TOL(0.5, energyOnly.getPotentialEnergy(), FORCE_TOL);
     // Each particle has shifted speed 0.5*dt*10 = 0.05, so the total
     // half-step kinetic energy is 2*(m*v^2/2) = 0.0025.
     ASSERT_EQUAL_TOL(0.0025, energyOnly.getKineticEnergy(), FORCE_TOL);
 
-    State forcesAfter = context.getState(State::Forces);
+    // Inspect storage before any new force evaluation can repopulate it.
+    vector<MetalFixedPoint64Storage> longForcesAfter;
+    metal.getLongForceBuffer().download(longForcesAfter);
+    ASSERT_EQUAL(longForcesBefore.size(), longForcesAfter.size());
+    for (size_t i = 0; i < longForcesBefore.size(); i++) {
+        ASSERT_EQUAL(longForcesBefore[i].lo, longForcesAfter[i].lo);
+        ASSERT_EQUAL(longForcesBefore[i].hi, longForcesAfter[i].hi);
+    }
+    vector<Vec3> forcesAfter;
+    metal.getForces(forcesAfter);
     for (int i = 0; i < 2; i++)
-        ASSERT_EQUAL_VEC(forcesBefore.getForces()[i], forcesAfter.getForces()[i], FORCE_TOL);
+        ASSERT_EQUAL_VEC(forcesBefore.getForces()[i], forcesAfter[i], FORCE_TOL);
 }
 
 void testCheckpointRoundTrip(MetalPlatform& platform) {
@@ -440,6 +562,7 @@ int main() {
         }
         MetalPlatform platform;
         testHarmonicBondAndVerlet(platform);
+        testLogical64ForceConsumers(platform);
         testMultipleBondsWithSharedParticle(platform);
         testMultipleForceObjectsAndThreadgroups(platform);
         testTrajectoryAgainstReference(platform);

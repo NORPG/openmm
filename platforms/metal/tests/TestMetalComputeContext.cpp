@@ -13,6 +13,7 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -471,7 +472,7 @@ void testLongForceBuffer() {
         ASSERT_EQUAL(0u, value.hi);
     }
 
-    // Version 2 checkpoints preserve the complete padded long force buffer.
+    // Version 3 checkpoints preserve the authoritative padded long buffer.
     buffer.upload(sentinels);
     stringstream checkpoint(ios_base::in | ios_base::out | ios_base::binary);
     context.createCheckpoint(checkpoint);
@@ -484,8 +485,8 @@ void testLongForceBuffer() {
         ASSERT_EQUAL(sentinels[i].hi, values[i].hi);
     }
 
-    // New readers remain compatible with version 1 checkpoints, which have
-    // no long force payload.  Loading one must clear pre-existing scratch data.
+    // Version 1 has no long payload.  Its zero float forces must replace
+    // pre-existing long data when converted by the new reader.
     string legacyCheckpointData = checkpoint.str();
     const size_t longForceBytes = elementCount*sizeof(MetalFixedPoint64Storage);
     ASSERT(legacyCheckpointData.size() >= 2*sizeof(uint32_t)+longForceBytes);
@@ -503,6 +504,109 @@ void testLongForceBuffer() {
     }
     testFixedPointHelpers(context);
     testCounterAtomicHelper(context);
+}
+
+void testForceConversionAndCheckpoints() {
+    System system;
+    for (int i = 0; i < ComputeContext::TileSize+1; i++)
+        system.addParticle(1.0);
+    MetalContext context(system, NULL, 0);
+    const size_t padded = context.getPaddedNumAtoms();
+    const double unit = ldexp(1.0, -32);
+    // Distinct words exercise signed reconstruction, both small signs and
+    // fractional low bits that would be lost by an intermediate float.
+    const vector<MetalFixedPoint64Storage> components = {
+        {1u, 0u}, {0xffffffffu, 0xffffffffu}, {1u, 1u},
+        {0x80000000u, 0xfffffffeu}, {0xffffffffu, 0u}, {0u, 0x80000000u}
+    };
+    const vector<double> expected = {unit, -unit, 1.0+unit, -1.5, 1.0-unit, -2147483648.0};
+    vector<MetalFixedPoint64Storage> longData(3*padded, {0xdeadbeefu, 0xfedcba98u});
+    for (int atom = 0; atom < system.getNumParticles(); atom++)
+        for (int axis = 0; axis < 3; axis++)
+            longData[atom+axis*padded] = components[(atom+axis)%components.size()];
+    context.getLongForceBuffer().upload(longData);
+    vector<MetalFloat4> floatData(padded, {9.0f, -8.0f, 7.0f, 6.0f});
+    context.getFloatForceBuffer().upload(floatData);
+    vector<Vec3> forces;
+    context.getForces(forces);
+    ASSERT_EQUAL(system.getNumParticles(), forces.size());
+    for (int atom = 0; atom < system.getNumParticles(); atom++)
+        for (int axis = 0; axis < 3; axis++)
+            ASSERT_EQUAL(expected[(atom+axis)%expected.size()], forces[atom][axis]);
+
+    stringstream checkpoint(ios_base::in | ios_base::out | ios_base::binary);
+    context.createCheckpoint(checkpoint);
+    const string currentData = checkpoint.str();
+    const size_t longBytes = longData.size()*sizeof(MetalFixedPoint64Storage);
+    const uint32_t trailer = 0x13579bdfu;
+    // Use the same byte layout to emulate both legacy versions.  In v2 the
+    // deliberately conflicting long payload must be consumed but ignored.
+    for (uint32_t version = 1; version <= 3; version++) {
+        string data = currentData;
+        memcpy(&data[sizeof(uint32_t)], &version, sizeof(version));
+        if (version == 1)
+            data.resize(data.size()-longBytes);
+        data.append(reinterpret_cast<const char*>(&trailer), sizeof(trailer));
+        stringstream input(data, ios_base::in | ios_base::out | ios_base::binary);
+        context.clearForces();
+        context.loadCheckpoint(input);
+        uint32_t actualTrailer = 0;
+        input.read(reinterpret_cast<char*>(&actualTrailer), sizeof(actualTrailer));
+        ASSERT_EQUAL(trailer, actualTrailer);
+        context.getForces(forces);
+        for (int atom = 0; atom < system.getNumParticles(); atom++)
+            for (int axis = 0; axis < 3; axis++)
+                ASSERT_EQUAL(version == 3 ? expected[(atom+axis)%expected.size()] :
+                             (axis == 0 ? 9.0 : axis == 1 ? -8.0 : 7.0), forces[atom][axis]);
+        vector<MetalFixedPoint64Storage> restored;
+        context.getLongForceBuffer().download(restored);
+        for (size_t axis = 0; axis < 3; axis++)
+            for (size_t atom = system.getNumParticles(); atom < padded; atom++) {
+                ASSERT_EQUAL(version == 3 ? longData[atom+axis*padded].lo : 0u, restored[atom+axis*padded].lo);
+                ASSERT_EQUAL(version == 3 ? longData[atom+axis*padded].hi : 0u, restored[atom+axis*padded].hi);
+            }
+    }
+
+    // The producer bridge quantizes to Q32.32 and zeroes every padded lane.
+    for (int atom = 0; atom < system.getNumParticles(); atom++)
+        floatData[atom] = {float(1.5*unit), float(-1.5*unit), -1.5f, 123.0f};
+    context.getFloatForceBuffer().upload(floatData);
+    context.convertFloatForcesToFixedPoint();
+    context.getForces(forces);
+    for (const Vec3& force : forces) {
+        ASSERT_EQUAL(unit, force[0]);
+        ASSERT_EQUAL(-unit, force[1]);
+        ASSERT_EQUAL(-1.5, force[2]);
+    }
+    vector<MetalFixedPoint64Storage> converted;
+    context.getLongForceBuffer().download(converted);
+    for (size_t axis = 0; axis < 3; axis++)
+        for (size_t atom = system.getNumParticles(); atom < padded; atom++) {
+            ASSERT_EQUAL(0u, converted[atom+axis*padded].lo);
+            ASSERT_EQUAL(0u, converted[atom+axis*padded].hi);
+        }
+
+    // Never silently convert an unrepresentable or nonfinite force to an
+    // unrelated integer.  Include both valid endpoints and invalid neighbours.
+    floatData[0] = {-2147483648.0f, nextafter(2147483648.0f, 0.0f), 0.0f, 0.0f};
+    context.getFloatForceBuffer().upload(floatData);
+    context.convertFloatForcesToFixedPoint();
+    context.getForces(forces);
+    ASSERT_EQUAL(double(floatData[0].x), forces[0][0]);
+    ASSERT_EQUAL(double(floatData[0].y), forces[0][1]);
+    for (float invalid : {2147483648.0f, nextafter(-2147483648.0f, -numeric_limits<float>::infinity()),
+                          numeric_limits<float>::infinity(), numeric_limits<float>::quiet_NaN()}) {
+        floatData[0].x = invalid;
+        context.getFloatForceBuffer().upload(floatData);
+        bool rejected = false;
+        try {
+            context.convertFloatForcesToFixedPoint();
+        }
+        catch (const OpenMMException& e) {
+            rejected = string(e.what()).find("Q32.32") != string::npos;
+        }
+        ASSERT(rejected);
+    }
 }
 
 void testCoreContextSurface() {
@@ -620,6 +724,7 @@ int main() {
             return 0;
         }
         testLongForceBuffer();
+        testForceConversionAndCheckpoints();
         testCoreContextSurface();
     }
     catch (const exception& e) {

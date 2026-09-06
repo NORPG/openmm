@@ -149,7 +149,7 @@ if(OPENMM_METAL_USE_EMBEDDED_METALLIB)
                     "-fmodules-cache-path=${OPENMM_METAL_MODULE_CACHE}"
                     -isysroot "${OPENMM_METAL_SDK}"
                     "${kernel_source}" -o "${kernel_air}"
-            DEPENDS "${kernel_source}"
+            DEPENDS "${kernel_source}" "${METAL_KERNEL_SOURCE_DIR}/kernels/fixedPoint.metal"
             COMMENT "Compiling ${kernel_name}.metal"
             VERBATIM)
         list(APPEND OPENMM_METAL_AIR_FILES "${kernel_air}")

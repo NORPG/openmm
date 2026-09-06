@@ -28,6 +28,7 @@
 #include "MetalKernels.h"
 #include "MetalArray.h"
 #include "MetalContext.h"
+#include "MetalKernelLibrary.h"
 #ifndef OPENMM_METAL_USE_EMBEDDED_METALLIB
 #include "MetalKernelSources.h"
 #endif
@@ -48,11 +49,6 @@
 
 using namespace OpenMM;
 using namespace std;
-
-#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
-extern "C" const unsigned char openmmMetalMetallibStart[];
-extern "C" const unsigned char openmmMetalMetallibEnd[];
-#endif
 
 namespace {
 
@@ -93,18 +89,6 @@ void validateNoVirtualSites(const System& system) {
     }
 }
 
-#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
-unique_ptr<MetalProgram> loadProductionMetalProgram(MetalQueue& queue) {
-    const uintptr_t start = reinterpret_cast<uintptr_t>(openmmMetalMetallibStart);
-    const uintptr_t end = reinterpret_cast<uintptr_t>(openmmMetalMetallibEnd);
-    if (end <= start)
-        throw OpenMMException("The embedded OpenMM Metal library is empty");
-    return unique_ptr<MetalProgram>(new MetalProgram(
-            queue, openmmMetalMetallibStart,
-            static_cast<size_t>(end-start)));
-}
-#endif
-
 } // namespace
 
 MetalCalcForcesAndEnergyKernel::MetalCalcForcesAndEnergyKernel(string name, const Platform& platform) :
@@ -119,17 +103,17 @@ void MetalCalcForcesAndEnergyKernel::beginComputation(ContextImpl& context, bool
                                                        bool includeEnergy, int groups) {
     (void) includeEnergy;
     (void) groups;
-    getMetalContext(context).clearAutoclearBuffers();
+    getMetalContext(context).clearAutoclearBuffers(includeForce);
     if (includeForce)
-        getMetalContext(context).clearForces();
+        getMetalContext(context).clearBuffer(getMetalContext(context).getFloatForceBuffer());
 }
 
 double MetalCalcForcesAndEnergyKernel::finishComputation(ContextImpl& context, bool includeForce,
                                                           bool includeEnergy, int groups, bool& valid) {
-    (void) context;
-    (void) includeForce;
     (void) includeEnergy;
     (void) groups;
+    if (includeForce)
+        getMetalContext(context).convertFloatForcesToFixedPoint();
     valid = true;
     return 0.0;
 }
@@ -640,15 +624,16 @@ void MetalIntegrateVerletStepKernel::initialize(const System& system, const Verl
 #ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
     impl->program = loadProductionMetalProgram(queue);
 #else
-    impl->program.reset(new MetalProgram(queue, MetalKernelSources::verlet));
+    impl->program.reset(new MetalProgram(queue, MetalKernelSources::fixedPoint+"\n"+MetalKernelSources::verlet));
 #endif
     impl->kernel = impl->program->createMetalKernel("integrateVerlet");
     impl->kernel->addArg(impl->context->getPositions());
     impl->kernel->addArg(impl->context->getVelocities());
-    impl->kernel->addArg(impl->context->getForces());
+    impl->kernel->addArg(impl->context->getLongForceBuffer());
     impl->kernel->addArg(impl->context->getInverseMasses());
     impl->kernel->addArg(float(0.0f));
     impl->kernel->addArg(impl->numParticles);
+    impl->kernel->addArg(static_cast<uint32_t>(impl->context->getPaddedNumAtoms()));
     impl->initialized = true;
 }
 

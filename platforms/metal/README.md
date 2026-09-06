@@ -51,9 +51,28 @@ upload a host-sized zero array.  Queue ordering makes a following kernel or
 download observe the completed clear.
 
 GPU buffer copies preserve all 8 bytes of every logical element for Common's
-save/restore paths.  Metal checkpoint version 2 likewise stores the complete
-padded long-force buffer.  The loader accepts legacy version 1 checkpoints and
-GPU-clears the buffer because those checkpoints contain no long-force payload.
+save/restore paths.  Metal checkpoint version 3 stores the complete padded
+long-force buffer as the authoritative force state.  The loader accepts legacy
+versions 1 and 2, rebuilding long forces from their float4 payload on the CPU;
+version 2's long payload was scratch and is consumed but discarded.
+
+Verlet reads the logical buffer through `loadFixedPoint3()` and reconstructs
+binary32 forces on the GPU.  Force download reconstructs directly to double on
+the CPU, retaining fractional bits that an intermediate float would lose;
+shifted velocities and kinetic energy use this same download path.  Energy-only
+evaluations preserve the force buffers while clearing other autoclear arrays.
+
+The native harmonic-bond and nonbonded producers currently accumulate float4
+forces.  At the end of a force evaluation, `forceBuffers.metal` converts the
+completed sum into the logical buffer, including zeroed padding.  This interim
+bridge follows the same offline/runtime compilation policy as the other
+production kernels and adds a GPU dispatch and a small validation readback per
+force evaluation.
+Inputs must be finite and within `[-2^31, 2^31)`; an unrepresentable value raises
+an error before a consumer uses it.  The bridge overwrites the logical buffer,
+so producers must be migrated together before enabling direct long-buffer
+accumulation.  The Common float-buffer accessors still expose the native
+producer accumulator; consumers explicitly bind `getLongForceBuffer()`.
 
 `src/kernels/fixedPoint.metal` defines the Metal 3.0 helper contract used by
 runtime-generated kernels.  `MetalContext::compileProgram()` prepends this
@@ -94,8 +113,8 @@ The word order above is an ABI rule rather than an inference from byte
 endianness.  Atomic writers must bind the buffer as scalar `atomic_uint` words,
 using indices `2*i` and `2*i+1`.  They must not concurrently update components
 through a `uint2` view.  Read-only `uint2` access is permitted only after all
-atomic writers have completed.  Routing Common force producers into this
-buffer remains separate work.
+atomic writers have completed.  Routing Common force producers directly into
+this buffer remains separate work.
 
 ## Current support boundary
 
@@ -136,8 +155,9 @@ compilation is controlled by `OPENMM_METAL_KERNEL_COMPILATION`:
 The focused test targets are:
 
 - `TestMetalComputeContext`: the minimal `ComputeContext` contract, standard
-  state-buffer ABI, `ComputeArray` interoperability, events, and runtime MSL
-  compilation through the generic compute interfaces
+  state-buffer ABI, `ComputeArray` interoperability, events, runtime MSL
+  compilation through the generic compute interfaces, logical-64 force
+  reconstruction, conversion boundaries, and checkpoint v1/v2/v3 compatibility
 - `TestMetalPlatform`: plugin registration, device properties, and the required
   OpenMM kernel-factory surface
 - `TestMetalRuntime`: buffers, transfers, queues, events, runtime MSL
@@ -146,7 +166,8 @@ The focused test targets are:
 - `TestMetalVerticalSlice`: analytic force/energy values, Verlet state changes,
   Reference trajectory comparison, parameter updates, checkpoint replay,
   minimization, shared-particle bond accumulation, and rejection of unsupported
-  features
+  features; direct logical-buffer consumer tests also verify Verlet, force
+  download, shifted velocities, kinetic energy, and energy-only preservation
 - `TestMetalNonbondedForce`: analytic Coulomb/Lennard-Jones values, exceptions,
   parameter updates, force groups, include flags, multi-threadgroup execution,
   Reference trajectory comparison, and rejection of unsupported methods

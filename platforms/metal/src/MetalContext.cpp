@@ -15,6 +15,7 @@
 #include "MetalContext.h"
 #include "MetalFixedPoint.h"
 #include "MetalEvent.h"
+#include "MetalKernelLibrary.h"
 #include "MetalKernelSources.h"
 #include "MetalProgram.h"
 #include "openmm/OpenMMException.h"
@@ -35,7 +36,9 @@ using namespace std;
 namespace {
 
 const uint32_t checkpointMagic = 0x4d544c31; // "MTL1"
-const uint32_t checkpointVersion = 2;
+// Version 3 makes the long force payload authoritative.  In versions 1/2,
+// consumers read float forces and the version-2 long payload was scratch.
+const uint32_t checkpointVersion = 3;
 const uint32_t oldestSupportedCheckpointVersion = 1;
 
 template <class T>
@@ -65,6 +68,21 @@ void fromFloat4(const vector<MetalFloat4>& values, int count, vector<Vec3>& resu
     result.resize(count);
     for (int i = 0; i < count; i++)
         result[i] = Vec3(values[i].x, values[i].y, values[i].z);
+}
+
+double reconstructForce(const MetalFixedPoint64Storage& value) {
+    const int64_t high = value.hi < 0x80000000u
+            ? static_cast<int64_t>(value.hi) : static_cast<int64_t>(value.hi)-INT64_C(4294967296);
+    // Both terms are exact doubles; their sum rounds once, on the CPU.
+    return static_cast<double>(high)+ldexp(static_cast<double>(value.lo), -32);
+}
+
+MetalFixedPoint64Storage convertLegacyForce(float value) {
+    if (!isfinite(value) || value < -2147483648.0 || value >= 2147483648.0)
+        throw OpenMMException("The Metal checkpoint force is outside the finite Q32.32 range");
+    const int64_t fixed = static_cast<int64_t>(ldexp(static_cast<double>(value), 32));
+    const uint64_t bits = static_cast<uint64_t>(fixed);
+    return {static_cast<uint32_t>(bits), static_cast<uint32_t>(bits >> 32)};
 }
 
 string addDefines(const string& source, const map<string, string>& defines) {
@@ -241,18 +259,49 @@ void MetalContext::getVelocities(vector<Vec3>& values) const {
 }
 
 void MetalContext::getForces(vector<Vec3>& values) const {
-    vector<MetalFloat4> data;
-    forces->download(data);
-    fromFloat4(data, numAtoms, values);
+    vector<MetalFixedPoint64Storage> data;
+    longForceBuffer->download(data);
+    values.resize(numAtoms);
+    for (int i = 0; i < numAtoms; i++)
+        values[i] = Vec3(reconstructForce(data[i]),
+                         reconstructForce(data[i+paddedNumAtoms]),
+                         reconstructForce(data[i+2*paddedNumAtoms]));
 }
 
 void MetalContext::clearForces() {
     clearBuffer(*forces);
+    clearBuffer(*longForceBuffer);
 }
 
-void MetalContext::clearAutoclearBuffers() {
-    for (ArrayInterface* array : autoclearBuffers)
-        clearBuffer(*array);
+void MetalContext::convertFloatForcesToFixedPoint() {
+    if (!convertForcesKernel) {
+        forceConversionError.reset(new MetalArray(*queue, 1, sizeof(uint32_t), "force conversion error"));
+#ifdef OPENMM_METAL_USE_EMBEDDED_METALLIB
+        unique_ptr<MetalProgram> program = loadProductionMetalProgram(*queue);
+#else
+        unique_ptr<MetalProgram> program(new MetalProgram(
+                *queue, MetalKernelSources::fixedPoint+"\n"+MetalKernelSources::forceBuffers));
+#endif
+        convertForcesKernel = program->createKernel("convertFloatForcesToFixedPoint");
+        convertForcesKernel->addArg(*forces);
+        convertForcesKernel->addArg(*longForceBuffer);
+        convertForcesKernel->addArg(*forceConversionError);
+        convertForcesKernel->addArg(static_cast<uint32_t>(numAtoms));
+        convertForcesKernel->addArg(static_cast<uint32_t>(paddedNumAtoms));
+    }
+    forceConversionError->clear();
+    convertForcesKernel->execute(paddedNumAtoms);
+    uint32_t error;
+    forceConversionError->download(&error);
+    if (error != 0)
+        throw OpenMMException("Metal force cannot be represented as finite Q32.32 (required range [-2^31, 2^31))");
+}
+
+void MetalContext::clearAutoclearBuffers(bool clearForceBuffer) {
+    for (ArrayInterface* array : autoclearBuffers) {
+        if (clearForceBuffer || (array != longForceBuffer.get() && array != forces.get()))
+            clearBuffer(*array);
+    }
 }
 
 void MetalContext::advanceTime(double stepSize) {
@@ -592,6 +641,16 @@ void MetalContext::loadCheckpoint(istream& stream) {
     }
     if (!stream)
         throw OpenMMException("Error reading a Metal checkpoint");
+    if (version < 3) {
+        // Legacy long data was scratch.  Rebuild all three planes from the
+        // force payload that old consumers actually used, before mutating state.
+        longForceData.assign(longForceBuffer->getSize(), {0u, 0u});
+        for (int i = 0; i < numAtoms; i++) {
+            longForceData[i] = convertLegacyForce(forceData[i].x);
+            longForceData[i+paddedNumAtoms] = convertLegacyForce(forceData[i].y);
+            longForceData[i+2*paddedNumAtoms] = convertLegacyForce(forceData[i].z);
+        }
+    }
     for (int i = 0; i < numAtoms; i++) {
         // Charges and inverse masses are System metadata, not checkpointed
         // state.  This also keeps version-1 checkpoints written by the old
@@ -606,10 +665,5 @@ void MetalContext::loadCheckpoint(istream& stream) {
     positions->upload(positionData);
     velocities->upload(velocityData);
     forces->upload(forceData);
-    if (version >= 2)
-        longForceBuffer->upload(longForceData);
-    else
-        // Version 1 predates the long force payload.  Clear it instead of
-        // retaining unrelated scratch data from before the restore.
-        longForceBuffer->clear(true);
+    longForceBuffer->upload(longForceData);
 }

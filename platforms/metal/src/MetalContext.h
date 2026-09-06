@@ -48,6 +48,7 @@ public:
     MetalQueue& getQueue();
     MetalArray& getPositions();
     MetalArray& getVelocities();
+    /** Legacy float4 accumulator used by native force producers. */
     MetalArray& getForces();
     MetalArray& getInverseMasses();
 
@@ -57,7 +58,10 @@ public:
     void getVelocities(std::vector<Vec3>& values) const;
     void getForces(std::vector<Vec3>& values) const;
     void clearForces();
-    void clearAutoclearBuffers();
+    /** Convert the completed native float accumulator for logical-64 consumers. */
+    void convertFloatForcesToFixedPoint();
+    /** Preserve force accumulators on energy-only evaluations. */
+    void clearAutoclearBuffers(bool clearForceBuffer = true);
 
     void advanceTime(double stepSize);
 
@@ -125,6 +129,8 @@ private:
     std::unique_ptr<MetalArray> velocities;
     std::unique_ptr<MetalArray> forces;
     std::unique_ptr<MetalArray> longForceBuffer;
+    std::unique_ptr<MetalArray> forceConversionError;
+    ComputeKernel convertForcesKernel;
     std::unique_ptr<MetalArray> inverseMasses;
     std::unique_ptr<MetalArray> energyBuffer;
     std::unique_ptr<MetalArray> energyParamDerivBuffer;

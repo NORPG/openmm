@@ -1,3 +1,6 @@
+#ifndef OPENMM_METAL_FIXED_POINT
+#define OPENMM_METAL_FIXED_POINT
+
 #include <metal_stdlib>
 #include <metal_atomic>
 using namespace metal;
@@ -181,3 +184,5 @@ inline float3 loadFixedPoint3(device const uint2* values, uint atom,
                   loadSignedFixedPoint(values, atom+paddedNumAtoms),
                   loadSignedFixedPoint(values, atom+2u*paddedNumAtoms));
 }
+
+#endif // OPENMM_METAL_FIXED_POINT
