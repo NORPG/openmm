@@ -12,6 +12,7 @@
 
 #include "MetalArray.h"
 #include "MetalDeviceCaps.h"
+#include "MetalCapabilityProbeInternal.h"
 #include "openmm/OpenMMException.h"
 #include <condition_variable>
 #include <cstdint>
@@ -49,6 +50,7 @@ public:
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
     MetalDeviceCaps caps;
+    std::shared_ptr<MetalCapabilityProbeCache> capabilityProbes;
     std::mutex submissionMutex;
 
 private:

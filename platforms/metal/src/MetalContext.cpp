@@ -402,6 +402,10 @@ bool MetalContext::getSupports64BitGlobalAtomics() const {
     return false;
 }
 
+bool MetalContext::getSupportsSplitFixedPointEmulation() const {
+    return queue->getSplitFixedPointEmulationSupport().isSupported();
+}
+
 bool MetalContext::getSupportsDoublePrecision() const {
     return false;
 }

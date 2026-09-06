@@ -28,7 +28,8 @@ string OpenMM::detail::describeError(NSError* error) {
     return message.empty() ? string("unknown Metal error") : message;
 }
 
-MetalQueueState::MetalQueueState(size_t deviceIndex) : device(nil), commandQueue(nil) {
+MetalQueueState::MetalQueueState(size_t deviceIndex) : device(nil), commandQueue(nil),
+        capabilityProbes(make_shared<MetalCapabilityProbeCache>()) {
     @autoreleasepool {
         NSArray<id<MTLDevice> >* devices = MTLCopyAllDevices();
         if (deviceIndex >= devices.count) {
@@ -47,7 +48,8 @@ MetalQueueState::MetalQueueState(size_t deviceIndex) : device(nil), commandQueue
 }
 
 MetalQueueState::MetalQueueState(const shared_ptr<MetalQueueState>& parent) :
-        device(parent->device), commandQueue(nil), caps(parent->caps) {
+        device(parent->device), commandQueue(nil), caps(parent->caps),
+        capabilityProbes(parent->capabilityProbes) {
     @autoreleasepool {
         commandQueue = [device newCommandQueue];
         if (commandQueue == nil)
@@ -213,4 +215,21 @@ void MetalQueue::checkForErrors() {
 
 const MetalDeviceCaps& MetalQueue::getDeviceCaps() const {
     return state->caps;
+}
+
+const MetalCapabilityProbeResult& MetalQueue::getSplitFixedPointEmulationSupport() const {
+    const shared_ptr<MetalCapabilityProbeCache> cache = state->capabilityProbes;
+    call_once(cache->splitFixedPointOnce, [this, cache] {
+        try {
+            // Failed experimental commands must not poison the caller's queue.
+            shared_ptr<MetalQueue> probeQueue = createSiblingQueue();
+            cache->splitFixedPoint = runSplitFixedPointProbe(
+                    *probeQueue, getSplitFixedPointProbeSource());
+        }
+        catch (const exception& e) {
+            cache->splitFixedPoint.status = MetalCapabilityProbeResult::Status::InitializationFailed;
+            cache->splitFixedPoint.diagnostic = string("Cannot initialize split fixed-point probe: ")+e.what();
+        }
+    });
+    return cache->splitFixedPoint;
 }

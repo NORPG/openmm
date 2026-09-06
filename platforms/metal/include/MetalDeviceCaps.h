@@ -34,6 +34,8 @@ class MetalQueueState;
  * atomic operations needed by OpenMM are not part of the public MSL contract
  * on all devices that report the same GPU family.  Code that needs them must
  * use an explicit compile-and-dispatch probe or a portable fallback.
+ * Split fixed-point emulation has a separate runtime-tested result exposed by
+ * MetalQueue::getSplitFixedPointEmulationSupport(), not by these family flags.
  */
 class OPENMM_EXPORT_METAL MetalDeviceCaps {
 public:

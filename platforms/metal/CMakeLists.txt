@@ -138,6 +138,11 @@ if(OPENMM_METAL_USE_EMBEDDED_METALLIB)
     set(OPENMM_METAL_AIR_FILES)
     foreach(kernel_source IN LISTS METAL_KERNEL_FILES)
         get_filename_component(kernel_name "${kernel_source}" NAME_WE)
+        # Capability compilation failures must be runtime probe results, not
+        # production-library build failures.  Still embed this source below.
+        if(kernel_name STREQUAL "capabilityProbe")
+            continue()
+        endif()
         set(kernel_air "${OPENMM_METAL_KERNEL_BUILD_DIR}/${kernel_name}.air")
         add_custom_command(
             OUTPUT "${kernel_air}"

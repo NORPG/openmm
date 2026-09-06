@@ -180,9 +180,61 @@ version.  See Apple's [hazard-tracking scope](https://developer.apple.com/docume
 
 Existing tests cover ordered blit/compute/readback, contending split-atomic
 updates followed by blocking readback, long-buffer save/restore, and production
-logical-64 consumers.  They do not yet cover a cross-queue writer/reader payload
-or multiple split-atomic writer dispatches feeding a GPU reconstruction dispatch
-without an intermediate CPU wait.
+logical-64 consumers.  The capability probe below also tests two split-atomic
+writer dispatches feeding a GPU reconstruction dispatch without an intermediate
+CPU wait.  Cross-queue writer/reader payload testing remains separate work.
+
+### Runtime split fixed-point capability probe
+
+`MetalQueue::getSplitFixedPointEmulationSupport()` returns an independent
+`MetalCapabilityProbeResult`.  The first query blocks while it compiles the
+production `fixedPoint.metal` helpers together with `capabilityProbe.metal`,
+creates both compute pipelines, dispatches work, and validates the results.
+The probe always compiles embedded MSL source through the selected device's
+runtime with Metal 3.0 and production fast-math settings, even when production
+kernels use an offline metallib.  The probe source is embedded but excluded
+from the production offline library, so probe compilation failure can be
+reported at runtime instead of preventing the plugin from building.
+It never reads shader files at runtime.
+
+The probe submits two sets of 2,053 contending writers across multiple
+threadgroups, targeting five atoms in three padded component planes.  Cases
+include positive and negative fractions, sub-Q32.32-unit truncation, low-word
+carry, high-word wraparound, and signed endpoints.  A separate reader dispatch
+loads the raw word pairs and reconstructs forces before any CPU wait.  Host
+validation checks exact modulo-2^64 sums, reconstructed float values, unchanged
+padding, and reader metadata.  Successful source compilation alone is not a
+positive capability result.
+
+The public result contains `status`, `diagnostic`, `isSupported()`, and
+`getStatusName()`.  Status names are `not-run`, `supported`,
+`initialization-failed`, `compilation-failed`, `pipeline-creation-failed`,
+`execution-failed`, and `validation-failed`.  Runtime source compilation also
+creates the Metal library; failure at that API boundary is reported as
+`compilation-failed`.  Only a fully validated result reports support.  Failure
+diagnostics distinguish the failed stage and do not imply that a transient
+allocation/runtime failure proves a permanent hardware limitation.
+
+Probes use an isolated sibling queue and private scratch buffers, drain their
+GPU work/errors, and never touch simulation state.  The owning queue and all
+its siblings share one thread-safe, immutable cached result.  A new independent
+`MetalQueue` can retry, rather than inheriting a process-wide cached failure.
+`MetalDeviceCaps::enumerate()` and device-family queries remain static queries
+and do not dispatch a probe.
+
+`MetalContext::getSupportsSplitFixedPointEmulation()` exposes the validated
+Boolean separately from `getSupports64BitGlobalAtomics()`, which remains false.
+Split accumulation still does not provide a linearizable 64-bit fetch-add or
+a coherent previous 64-bit value.  Querying this capability does not change the
+current float4 producers/bridge, enable future Common producers, or implement
+automatic CPU fallback; future split-atomic paths must gate on this result.
+
+`TestMetalRuntime` checks the real probe, concurrent first queries,
+repeated/sibling/independent cache behavior, and isolated compile, pipeline,
+host-rejected dispatch, and wrong-result failures.  Its execution-failure test
+deliberately rejects an invalid block size
+on the host; it does not deliberately fault the GPU.  `TestMetalComputeContext`
+checks that split emulation and native 64-bit atomic support stay distinct.
 
 ## Current support boundary
 

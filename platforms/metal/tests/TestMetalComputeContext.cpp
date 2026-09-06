@@ -1,3 +1,4 @@
+#include "MetalCapabilityProbe.h"
 #include "MetalContext.h"
 #include "MetalFixedPoint.h"
 #include "MetalPlatform.h"
@@ -627,6 +628,13 @@ void testCoreContextSurface() {
     ASSERT(context.getAllContexts()[0] == &context);
     ASSERT(!context.getIsCPU());
     ASSERT_EQUAL(32, context.getSIMDWidth());
+    const MetalCapabilityProbeResult& splitSupport = context.getQueue().getSplitFixedPointEmulationSupport();
+    if (!splitSupport.isSupported())
+        throw OpenMMException(string("Split fixed-point capability probe failed: ")+
+                              splitSupport.getStatusName()+": "+splitSupport.diagnostic);
+    ASSERT(context.getSupportsSplitFixedPointEmulation());
+    // Split accumulation does not provide native 64-bit atomic fetch-add or
+    // a linearizable previous 64-bit value to the Common compute interface.
     ASSERT(!context.getSupports64BitGlobalAtomics());
     ASSERT(!context.getSupportsDoublePrecision());
     ASSERT(!context.getUseDoublePrecision());

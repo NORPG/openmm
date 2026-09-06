@@ -16,6 +16,7 @@
  * -------------------------------------------------------------------------- */
 
 #include "MetalDeviceCaps.h"
+#include "MetalCapabilityProbe.h"
 #include "openmm/common/ComputeQueue.h"
 #include <cstddef>
 #include <memory>
@@ -49,6 +50,14 @@ public:
     void checkForErrors();
 
     const MetalDeviceCaps& getDeviceCaps() const;
+
+    /**
+     * Compile and dispatch a split Q32.32 accumulation/reconstruction probe on
+     * an isolated sibling queue.  The first call blocks; later calls and sibling
+     * queues share the immutable result.  A new independent queue can retry.
+     * This does not report native 64-bit atomics or select a CPU fallback.
+     */
+    const MetalCapabilityProbeResult& getSplitFixedPointEmulationSupport() const;
 
 private:
     explicit MetalQueue(const std::shared_ptr<detail::MetalQueueState>& parent);

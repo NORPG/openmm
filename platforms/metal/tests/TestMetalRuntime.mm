@@ -1,4 +1,6 @@
 #include "MetalArray.h"
+#include "MetalCapabilityProbe.h"
+#include "MetalCapabilityProbeInternal.h"
 #include "MetalDeviceCaps.h"
 #include "MetalEvent.h"
 #include "MetalFixedPoint.h"
@@ -8,6 +10,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -35,6 +38,100 @@ void bindVectorKernel(const shared_ptr<MetalKernel>& kernel, MetalArray& a, Meta
     kernel->addArg(count);
 }
 
+void assertProbeStatus(const MetalCapabilityProbeResult& result,
+                       MetalCapabilityProbeResult::Status expected, const string& description) {
+    if (result.status != expected)
+        throw OpenMMException(description+": unexpected probe status "+result.getStatusName()+
+                              ": "+result.diagnostic);
+    if (result.isSupported() != (expected == MetalCapabilityProbeResult::Status::Supported))
+        throw OpenMMException(description+": inconsistent capability support flag");
+    if (string(result.getStatusName()).empty() || result.diagnostic.empty())
+        throw OpenMMException(description+": missing status or diagnostic");
+}
+
+void testSplitFixedPointCapability(MetalQueue& queue) {
+    typedef MetalCapabilityProbeResult::Status Status;
+    const MetalCapabilityProbeResult notRun;
+    if (notRun.status != Status::NotRun || notRun.isSupported() ||
+            string(notRun.getStatusName()).empty())
+        throw OpenMMException("An unexecuted capability probe incorrectly reports support");
+
+    // A sibling made before the first probe shares its eventual immutable
+    // result.  Repeated queries must not recompile or dispatch another probe.
+    shared_ptr<MetalQueue> sibling = queue.createSiblingQueue();
+    const MetalCapabilityProbeResult& result = queue.getSplitFixedPointEmulationSupport();
+    cout << "Split fixed-point emulation: " << result.getStatusName()
+         << ": " << result.diagnostic << endl;
+    assertProbeStatus(result, Status::Supported, "split fixed-point capability");
+    if (&result != &queue.getSplitFixedPointEmulationSupport() ||
+            &result != &sibling->getSplitFixedPointEmulationSupport())
+        throw OpenMMException("Repeated and sibling capability queries did not share the cached result");
+
+    // Independent queues may retry a transient failure; they must not share a
+    // process-wide cached result even when they refer to the same device.
+    MetalQueue independent;
+    shared_ptr<MetalQueue> independentSibling = independent.createSiblingQueue();
+    promise<void> start;
+    shared_future<void> ready = start.get_future().share();
+    auto firstQuery = async(launch::async, [&independent, ready] {
+        ready.wait();
+        return &independent.getSplitFixedPointEmulationSupport();
+    });
+    auto siblingQuery = async(launch::async, [independentSibling, ready] {
+        ready.wait();
+        return &independentSibling->getSplitFixedPointEmulationSupport();
+    });
+    start.set_value();
+    const MetalCapabilityProbeResult& independentResult = *firstQuery.get();
+    if (&independentResult != siblingQuery.get())
+        throw OpenMMException("Concurrent first capability queries did not share one published result");
+    assertProbeStatus(independentResult, Status::Supported, "independent split fixed-point capability");
+    if (&result == &independentResult)
+        throw OpenMMException("Independent Metal queues incorrectly share a capability cache");
+
+    const string source = detail::getSplitFixedPointProbeSource();
+    {
+        MetalQueue failureQueue;
+        const MetalCapabilityProbeResult failure = detail::runSplitFixedPointProbe(
+                failureQueue, "#error Intentional capability compilation failure\n");
+        assertProbeStatus(failure, Status::CompilationFailed, "capability compilation failure");
+        failureQueue.waitUntilIdle();
+    }
+    {
+        MetalQueue failureQueue;
+        const MetalCapabilityProbeResult failure = detail::runSplitFixedPointProbe(failureQueue,
+                "#include <metal_stdlib>\nusing namespace metal;\n"
+                "kernel void unrelatedCapabilityKernel(device uint* result [[buffer(0)]]) { result[0] = 1u; }\n");
+        assertProbeStatus(failure, Status::PipelineCreationFailed, "missing capability entry points");
+        failureQueue.waitUntilIdle();
+    }
+    {
+        MetalQueue failureQueue;
+        // Invalid dispatch geometry is rejected safely on the host, without
+        // submitting an invalid command or deliberately faulting the GPU.
+        const MetalCapabilityProbeResult failure = detail::runSplitFixedPointProbe(failureQueue, source, 0);
+        assertProbeStatus(failure, Status::ExecutionFailed, "capability execution failure");
+        failureQueue.waitUntilIdle();
+    }
+    {
+        MetalQueue failureQueue;
+        string wrongSource = source;
+        const string add = "atomicAddFixedPoint(words, index, realToFixedPoint(contributions[3u*writer+axis]));";
+        const size_t position = wrongSource.find(add);
+        if (position == string::npos || wrongSource.find(add, position+add.size()) != string::npos)
+            throw OpenMMException("Cannot isolate the capability writer for a result-validation failure test");
+        // Keep the production pipeline and buffer ABI, but accumulate zero.
+        // Successful compilation/dispatch alone must not claim support.
+        wrongSource.replace(position, add.size(), "atomicAddFixedPoint(words, index, uint2(0u));");
+        const MetalCapabilityProbeResult failure = detail::runSplitFixedPointProbe(failureQueue, wrongSource);
+        assertProbeStatus(failure, Status::ValidationFailed, "capability result mismatch");
+        failureQueue.waitUntilIdle();
+    }
+    assertProbeStatus(queue.getSplitFixedPointEmulationSupport(), Status::Supported,
+                      "cached capability after isolated failures");
+    queue.waitUntilIdle();
+}
+
 } // namespace
 
 int main() {
@@ -50,6 +147,7 @@ int main() {
             const MetalDeviceCaps& caps = queue.getDeviceCaps();
             if (caps.getName().empty() || caps.getMaxBufferLength() == 0 || caps.getMaxThreadsPerThreadgroup() == 0)
                 throw OpenMMException("Metal device capability query returned incomplete data");
+            testSplitFixedPointCapability(queue);
 
             const unsigned int count = 257;
             vector<float> aData(count), bData(count), expected(count);

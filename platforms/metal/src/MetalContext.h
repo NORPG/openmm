@@ -82,6 +82,8 @@ public:
     bool getIsCPU() const override;
     int getSIMDWidth() const override;
     bool getSupports64BitGlobalAtomics() const override;
+    /** Portable split accumulation is distinct from native 64-bit atomics. */
+    bool getSupportsSplitFixedPointEmulation() const;
     bool getSupportsDoublePrecision() const override;
     bool getUseDoublePrecision() const override;
     bool getUseMixedPrecision() const override;
