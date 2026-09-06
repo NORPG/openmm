@@ -116,6 +116,74 @@ through a `uint2` view.  Read-only `uint2` access is permitted only after all
 atomic writers have completed.  Routing Common force producers directly into
 this buffer remains separate work.
 
+### Writer completion and consumer synchronization
+
+This contract is already enforced by the current single-queue runtime; it does
+not require an additional shader barrier or a CPU wait after every dispatch.
+All writers for a force evaluation must finish both word updates before any
+consumer reads or reconstructs the logical value.  A low-word atomic, its carry,
+and the high-word atomic are not one indivisible 64-bit operation.  Neither
+`loadFixedPoint()` nor `getLongForceBuffer()` waits for writers by itself.
+
+The current force-evaluation order is:
+
+1. Clear the force accumulators on their owning queue.
+2. Submit every enabled native float4 force producer on that queue.
+3. Submit the float4-to-logical-64 conversion after the producers.  Its blocking
+   validation-flag download also waits for this writer dispatch to complete;
+   conversion failure prevents normal consumer execution.
+4. Submit a logical-64 GPU consumer, such as Verlet, or a force download,
+   checkpoint, or GPU save/restore copy after the final writer.
+5. Submit the next force clear/write phase only after the preceding consumers.
+   Energy-only evaluations preserve the force accumulators.
+
+The implementation supporting this order is:
+
+- `MetalKernel::execute()` in `src/MetalProgram.mm` creates a separate command
+  buffer with a normal compute encoder for each dispatch, ends encoding, and
+  commits it before returning.  It returns after submission, not GPU completion.
+  `submissionMutex` serializes encoding and commit with blits on the same queue;
+  callers must still submit producers before consumers, rather than racing
+  independent host threads to establish that order.
+- `src/MetalArray.mm` allocates individual buffers through `MTLDevice`, without
+  opting out of hazard tracking.  Their default is tracked, not the untracked
+  default of heaps.  Direct bindings expose the buffers to Metal; argument-buffer
+  bindings additionally declare them with `useResource`.  For this
+  `MTLCommandQueue` path, automatic hazard tracking supplies the required
+  inter-command read/write dependencies.  It is not merely an assumption that
+  submitting GPU work makes its memory immediately visible to the CPU.
+  See Apple's [default tracking mode](https://developer.apple.com/documentation/metal/mtlhazardtrackingmode/default)
+  and [tracked-resource guarantees](https://developer.apple.com/documentation/metal/mtlhazardtrackingmode/tracked).
+- Downloads blit private storage to shared staging storage on the same queue.
+  Blocking downloads wait for that command buffer and then copy to the caller's
+  memory.  For `download(..., false)`, the caller must keep the destination alive
+  and wait for `MetalQueue::waitUntilIdle()` before reading it; that method also
+  drains host completion callbacks.  An event wait alone is not a replacement
+  for draining an asynchronous download's host callback.
+
+For future direct split-atomic producers, retain separate writer and reader
+dispatches on this ordered, tracked-resource path, and remove the overwriting
+float4 bridge as part of that migration.  Do not reconstruct a value while
+other threads or threadgroups in the same dispatch may still update its words.
+Relaxed atomics do not publish the completed pair, and a threadgroup barrier
+cannot rendezvous all threadgroups; adding a shader fence does not supply that
+missing execution boundary.
+
+This contract does not cover cross-queue force-buffer access: kernel binding
+and array copying currently reject buffers owned by another queue, even though
+`MetalEvent` exposes queue signal/wait primitives.  Enabling cross-queue access,
+untracked resources/heaps, concurrent dispatches, or an `MTL4CommandQueue`
+requires a new synchronization implementation/review and writer-to-consumer
+tests.  In particular, Metal 4 command queues do not apply the automatic hazard
+tracking used here; the command-queue API is distinct from the MSL language
+version.  See Apple's [hazard-tracking scope](https://developer.apple.com/documentation/metal/mtlhazardtrackingmode).
+
+Existing tests cover ordered blit/compute/readback, contending split-atomic
+updates followed by blocking readback, long-buffer save/restore, and production
+logical-64 consumers.  They do not yet cover a cross-queue writer/reader payload
+or multiple split-atomic writer dispatches feeding a GPU reconstruction dispatch
+without an intermediate CPU wait.
+
 ## Current support boundary
 
 This is a deliberately small, executable vertical slice:
