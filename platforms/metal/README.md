@@ -5,7 +5,7 @@ Objective-C++, confined to private implementation files; installed headers and
 the OpenMM integration remain ordinary C++11.  It uses Apple's public Metal API
 directly and does not use Metal-cpp, OpenCL, or `cl2Metal`.
 
-Hand-written MSL lives only in standalone `src/kernels/*.metal` files.  The
+Production hand-written MSL lives in standalone `src/kernels/*.metal` files.  The
 build always encodes those sources into the plugin for runtime-generated
 kernels.  When Xcode's optional Metal Toolchain is available, it also compiles
 them offline and embeds one metallib in both shared and static plugins.  Both
@@ -271,6 +271,52 @@ compilation is controlled by `OPENMM_METAL_KERNEL_COMPILATION`:
   available, otherwise embed MSL source for runtime compilation
 - `ON`: require the full Xcode Metal Toolchain and offline compilation
 - `OFF`: always use the runtime-compilation compatibility path
+
+Run the complete four-way build and GPU validation from the repository root:
+
+```sh
+python3 devtools/validate-metal-builds.py --jobs 8
+```
+
+This requires Python 3.8+, native Apple Silicon macOS, a visible supported Metal
+GPU, CMake, Ninja, and Xcode with its Metal Toolchain installed.  Run outside a
+sandbox that blocks the Metal compiler or GPU.  The runner uses Release builds
+in four independent directories under `build/metal-matrix`:
+
+| Directory | Kernel compilation | Shared library | Static library |
+| --- | --- | --- | --- |
+| `offline-shared` | `ON` (required metallib) | `ON` | `OFF` |
+| `offline-static` | `ON` (required metallib) | `OFF` | `ON` |
+| `runtime-shared` | `OFF` (runtime MSL) | `ON` | `OFF` |
+| `runtime-static` | `OFF` (runtime MSL) | `OFF` | `ON` |
+
+Each combination builds and executes all five tests listed below; static-only
+builds use their `Static`-suffixed targets and do not build the shared OpenMM
+library.  Unrelated platforms, plugins, wrappers, and test suites are disabled.
+The runner checks the configured options, exact test inventory, actual CTest
+results, and the fixed-point oracle's reported compilation path.  Missing,
+failed, or skipped GPU tests fail validation, even when a legacy test returns
+success after reporting that no device is visible.  `AUTO` is deliberately not
+used: an offline-toolchain failure cannot silently become a runtime-path pass.
+Failures do not prevent the remaining combinations from being attempted.
+
+Configure/build/test logs and CTest XML remain in each build directory.  The
+parent `validation-results.json` records the source revision, dirty-worktree
+flag, per-case configuration, outcome, and test names.  Use `--build-root PATH`
+to select a different parent, `--generator NAME` for a different CMake
+generator, or repeat `--case NAME` to rerun selected combinations.  A partial
+run is marked `full_matrix: false` and is not a four-way validation result.
+The runner's result-validation checks can also be tested without a GPU with
+`python3 -B -m unittest devtools/test_validate_metal_builds.py`.
+
+In offline builds, `TestMetalComputeContext` also embeds a test-only
+`FixedPointTests.metallib`: `tests/FixedPointTests.metal` includes the production
+fixed-point/counter helpers and the same thin test entry kernels used by the
+runtime path.  Both variants execute identical CPU bit-exact oracle and
+contention tests; no arithmetic implementation is duplicated.  The generic
+`compileProgram()` test and the capability probe still compile at runtime in
+every configuration, since those specifically test the runtime compilation API.
+The test library is not linked into the production plugin.
 
 The focused test targets are:
 

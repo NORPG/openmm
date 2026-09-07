@@ -2,6 +2,7 @@
 #include "MetalContext.h"
 #include "MetalFixedPoint.h"
 #include "MetalPlatform.h"
+#include "MetalProgram.h"
 #include "MetalTestKernelSources.h"
 #include "openmm/System.h"
 #include "openmm/common/ComputeArray.h"
@@ -27,7 +28,26 @@ using namespace std;
 static_assert(is_base_of<ComputeContext, MetalContext>::value,
               "MetalContext must implement ComputeContext");
 
+#ifdef OPENMM_METAL_TEST_USE_EMBEDDED_FIXED_POINT_METALLIB
+extern "C" const unsigned char openmmMetalFixedPointTestsStart[];
+extern "C" const unsigned char openmmMetalFixedPointTestsEnd[];
+#endif
+
 namespace {
+
+ComputeProgram createFixedPointTestProgram(MetalContext& context, const string& source) {
+#ifdef OPENMM_METAL_TEST_USE_EMBEDDED_FIXED_POINT_METALLIB
+    (void) source;
+    const uintptr_t start = reinterpret_cast<uintptr_t>(openmmMetalFixedPointTestsStart);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(openmmMetalFixedPointTestsEnd);
+    if (end <= start)
+        throw OpenMMException("The embedded Metal fixed-point test library is empty");
+    return ComputeProgram(new MetalProgram(context.getQueue(),
+            openmmMetalFixedPointTestsStart, static_cast<size_t>(end-start)));
+#else
+    return context.compileProgram(source);
+#endif
+}
 
 void testFixedPointHostABI() {
     ASSERT_EQUAL(8, static_cast<int>(sizeof(MetalFixedPoint64Storage)));
@@ -46,7 +66,7 @@ float reconstructFixedPointOnHost(const MetalFixedPoint64Storage& value) {
 
 void testCounterAtomicHelper(MetalContext& context) {
     const string& source = MetalTestKernelSources::counterAtomics;
-    ComputeProgram program = context.compileProgram(source);
+    ComputeProgram program = createFixedPointTestProgram(context, source);
 
     const uint32_t threadCount = 32768;
     const uint32_t counterIndex = 1;
@@ -214,7 +234,7 @@ void testFixedPointHelpers(MetalContext& context) {
     };
 
     const string& source = MetalTestKernelSources::fixedPointHelpers;
-    ComputeProgram program = context.compileProgram(source);
+    ComputeProgram program = createFixedPointTestProgram(context, source);
 
     vector<float> inputValues;
     for (const auto& test : cases)
@@ -807,6 +827,11 @@ int main() {
             cout << "Test skipped: no supported Metal device is visible" << endl;
             return 0;
         }
+#ifdef OPENMM_METAL_TEST_USE_EMBEDDED_FIXED_POINT_METALLIB
+        cout << "Fixed-point oracle kernels: offline metallib" << endl;
+#else
+        cout << "Fixed-point oracle kernels: runtime compilation" << endl;
+#endif
         testLongForceBuffer();
         testForceConversionAndCheckpoints();
         testCoreContextSurface();

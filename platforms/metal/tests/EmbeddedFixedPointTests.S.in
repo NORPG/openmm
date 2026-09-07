@@ -1,0 +1,7 @@
+.section __DATA_CONST,__omm_mtl_test,regular,no_dead_strip
+.p2align 4
+.private_extern _openmmMetalFixedPointTestsStart
+_openmmMetalFixedPointTestsStart:
+.incbin "@METAL_FIXED_POINT_TEST_METALLIB@"
+.private_extern _openmmMetalFixedPointTestsEnd
+_openmmMetalFixedPointTestsEnd:
