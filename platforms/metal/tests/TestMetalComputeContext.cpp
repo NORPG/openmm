@@ -88,6 +88,81 @@ void testCounterAtomicHelper(MetalContext& context) {
     ASSERT_EQUAL(initialCounters[2], finalCounters[2]);
 }
 
+void testFixedPointCancellation(MetalContext& context, const ComputeProgram& program) {
+    struct CancellationCase {
+        uint64_t magnitude;
+        uint64_t initial;
+        int threads;
+    };
+    const vector<CancellationCase> cases = {
+        {UINT64_C(1), UINT64_C(0), 1},
+        {UINT64_C(0x0000000140000000), UINT64_C(0), 32768},
+        // 1.5 plus one raw Q32.32 unit: float reconstruction loses that bit.
+        {UINT64_C(0x0000000180000001), UINT64_C(0), 32768},
+        {UINT64_C(1), UINT64_MAX, 1},
+        {UINT64_C(0x0000000140000000), UINT64_C(0x123456789abcdef0), 32768},
+        {UINT64_C(0x0000000180000001), UINT64_C(0x8000000000000000), 32768}
+    };
+    ArrayInterface& longForces = context.getLongForceBuffer();
+    const uint32_t paddedNumAtoms = static_cast<uint32_t>(context.getPaddedNumAtoms());
+    const uint32_t lastAtom = static_cast<uint32_t>(context.getNumAtoms()-1);
+    ComputeKernel add = program->createKernel("addFixedPointAtomically");
+    add->addArg(longForces);
+    add->addArg(); // logical index
+    add->addArg(); // low word
+    add->addArg(); // high word
+
+    for (size_t caseIndex = 0; caseIndex < cases.size(); caseIndex++) {
+        const CancellationCase& test = cases[caseIndex];
+        const uint32_t index = lastAtom+static_cast<uint32_t>(caseIndex%3)*paddedNumAtoms;
+        add->setArg(1, index);
+        for (int negativeFirst = 0; negativeFirst < 2; negativeFirst++) {
+            vector<uint64_t> expected(longForces.getSize());
+            vector<MetalFixedPoint64Storage> initial(longForces.getSize());
+            for (size_t i = 0; i < expected.size(); i++) {
+                expected[i] = i == index ? test.initial : UINT64_C(0x2468ace013579bdf)+i;
+                initial[i] = {static_cast<uint32_t>(expected[i]),
+                              static_cast<uint32_t>(expected[i] >> 32)};
+            }
+            longForces.upload(initial);
+            for (int phase = 0; phase < 2; phase++) {
+                const bool negative = (phase == 0) == (negativeFirst != 0);
+                // Independent CPU oracle: unsigned 64-bit arithmetic defines
+                // both two's-complement negation and modulo-2^64 accumulation.
+                const uint64_t addend = negative ? uint64_t(0)-test.magnitude : test.magnitude;
+                for (int writer = 0; writer < test.threads; writer++)
+                    expected[index] += addend;
+                if (phase == 0) {
+                    ASSERT(expected[index] != test.initial);
+                }
+                else {
+                    ASSERT_EQUAL(test.initial, expected[index]);
+                }
+
+                add->setArg(2, static_cast<uint32_t>(addend));
+                add->setArg(3, static_cast<uint32_t>(addend >> 32));
+                add->execute(test.threads, min(256, add->getMaxBlockSize()));
+                // Wait for all writers through blocking download.  Checking
+                // the first phase prevents two skipped dispatches from passing
+                // merely because the final expected value equals the seed.
+                vector<MetalFixedPoint64Storage> actual;
+                longForces.download(actual);
+                ASSERT_EQUAL(expected.size(), actual.size());
+                for (size_t i = 0; i < expected.size(); i++) {
+                    if (actual[i].lo != static_cast<uint32_t>(expected[i]) ||
+                            actual[i].hi != static_cast<uint32_t>(expected[i] >> 32)) {
+                        stringstream message;
+                        message << "Fixed-point cancellation mismatch: case " << caseIndex
+                                << ", negative first " << negativeFirst << ", phase " << phase
+                                << ", index " << i;
+                        throwException(__FILE__, __LINE__, message.str());
+                    }
+                }
+            }
+        }
+    }
+}
+
 void testFixedPointHelpers(MetalContext& context) {
     struct ConversionCase {
         float input;
@@ -399,6 +474,7 @@ void testFixedPointHelpers(MetalContext& context) {
     ASSERT_EQUAL(-1.5f, loadedPlanes[0].y);
     ASSERT_EQUAL(unit, loadedPlanes[0].z);
     ASSERT_EQUAL(0.0f, loadedPlanes[0].w);
+    testFixedPointCancellation(context, program);
 }
 
 void testLongForceBuffer() {

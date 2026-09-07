@@ -292,6 +292,17 @@ The focused test targets are:
   parameter updates, force groups, include flags, multi-threadgroup execution,
   Reference trajectory comparison, and rejection of unsupported methods
 
+The CPU bit-exact fixed-point oracle coverage spans `TestMetalComputeContext`
+and the capability probe exercised by `TestMetalRuntime`: low-to-high carry,
+negative/two's-complement values, exact positive/negative cancellation,
+modulo-2^64 wraparound, repeated carries, and unchanged padded regions.
+`testFixedPointCancellation()` reuses the production atomic helper through the
+existing test entry kernel.  It checks both sign orders with single and
+32,768-writer dispatches, zero and nonzero seeds, and fractional low bits that
+float reconstruction cannot preserve.  Every dispatch is checked against CPU
+`uint64_t` sums by comparing both raw words across all three padded planes;
+the intermediate result must change before cancellation restores the seed.
+
 Passing these tests proves the native runtime and the documented vertical slice.
 It does not claim coverage of OpenMM's full kernel corpus or Intel/AMD Metal
 devices.
