@@ -3,7 +3,11 @@
 #else
 #define DPD_PARTICLE_SHUFFLE 0
 #endif
+#if defined(__METAL__) && __METAL_VERSION__ >= 300 && USE_DPD_TILE_BROADCAST
+#define DPD_TILE_BROADCAST 1
+#else
 #define DPD_TILE_BROADCAST 0
+#endif
 
 // The particle path preserves i=0..31 visitation and per-lane RNG consumption.
 #if (DPD_PARTICLE_SHUFFLE || DPD_TILE_BROADCAST) && TILE_SIZE != 32
@@ -230,12 +234,21 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
 
     unsigned int numTiles = interactionCount[0];
     DPD_DECLARE(int, atomIndices);
+#if !DPD_TILE_BROADCAST
     LOCAL int nextTile[WORK_GROUP_SIZE/TILE_SIZE];
+#endif
     for (int tile = warp; tile < numTiles; tile += totalWarps) {
+#if DPD_TILE_BROADCAST
+        int tileIndex = 0;
+        if (tgx == 0)
+            tileIndex = ATOMIC_ADD(tileCounter, 1);
+        tileIndex = simdShuffle(tileIndex, 0);
+#else
         if (tgx == 0)
             nextTile[tbx/TILE_SIZE] = ATOMIC_ADD(tileCounter, 1);
         SYNC_WARPS;
         int tileIndex = nextTile[tbx/TILE_SIZE];
+#endif
         int x = tiles[tileIndex];
         real4 blockSizeX = blockSize[x];
         bool singlePeriodicCopy = (0.5f*periodicBoxSize.x-blockSizeX.x >= MAX_CUTOFF &&
