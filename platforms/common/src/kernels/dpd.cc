@@ -1,3 +1,26 @@
+#if defined(__METAL__) && __METAL_VERSION__ >= 300 && USE_DPD_PARTICLE_SHUFFLE
+#define DPD_PARTICLE_SHUFFLE 1
+#else
+#define DPD_PARTICLE_SHUFFLE 0
+#endif
+#define DPD_TILE_BROADCAST 0
+
+// The particle path preserves i=0..31 visitation and per-lane RNG consumption.
+#if (DPD_PARTICLE_SHUFFLE || DPD_TILE_BROADCAST) && TILE_SIZE != 32
+#error Metal DPD register paths require TILE_SIZE=32
+#endif
+#if DPD_PARTICLE_SHUFFLE
+#define DPD_DECLARE(type, name) type name = type(0)
+#define DPD_LOCAL(name) name
+#define DPD_READ(name, index) name##_broadcast
+#define DPD_BROADCAST(type, name) type name##_broadcast = simdShuffle(name, i);
+#else
+#define DPD_DECLARE(type, name) LOCAL type name[WORK_GROUP_SIZE]
+#define DPD_LOCAL(name) name[LOCAL_ID]
+#define DPD_READ(name, index) name[index]
+#define DPD_BROADCAST(type, name)
+#endif
+
 typedef struct {
     mm_ulong state, increment;
     float next;
@@ -113,9 +136,13 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
     const int tgx = LOCAL_ID & (TILE_SIZE-1);
     const int tbx = LOCAL_ID - tgx;
     mixed halfdt = 0.5f*dt[0].y;
-    LOCAL mixed3 localPos[WORK_GROUP_SIZE];
-    LOCAL mixed4 localVel[WORK_GROUP_SIZE];
+    DPD_DECLARE(mixed3, localPos);
+    DPD_DECLARE(mixed4, localVel);
+#if DPD_PARTICLE_SHUFFLE
+    int localType = 0;
+#else
     LOCAL volatile int localType[WORK_GROUP_SIZE];
+#endif
 #ifndef USE_MIXED_PRECISION
     GLOBAL real4* posqCorrection = 0;
 #endif
@@ -147,9 +174,9 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
             pos1 += halfdt*trimTo3(vel1);
         int type1 = particleType[atom1];
         if (x == y) {
-            localVel[LOCAL_ID] = vel1;
-            localPos[LOCAL_ID] = pos1;
-            localType[LOCAL_ID] = type1;
+            DPD_LOCAL(localVel) = vel1;
+            DPD_LOCAL(localPos) = pos1;
+            DPD_LOCAL(localType) = type1;
         }
         else {
             int atom2 = y*TILE_SIZE + tgx;
@@ -157,25 +184,36 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
             mixed3 pos2 = loadPos(posq, posqCorrection, atom2);
             if (vel2.w != 0)
                 pos2 += halfdt*trimTo3(vel2);
-            localVel[LOCAL_ID] = vel2;
-            localPos[LOCAL_ID] = pos2;
-            localType[LOCAL_ID] = particleType[atom2];
+            DPD_LOCAL(localVel) = vel2;
+            DPD_LOCAL(localPos) = pos2;
+            DPD_LOCAL(localType) = particleType[atom2];
         }
         SYNC_WARPS;
-        if (atom1 < numAtoms) {
+#if !DPD_PARTICLE_SHUFFLE
+        if (atom1 < numAtoms)
+#endif
+        {
             for (int i = 0; i < TILE_SIZE; i++) {
+                // Padded lanes must still supply data to valid particle lanes.
+                DPD_BROADCAST(mixed3, localPos)
+                DPD_BROADCAST(mixed4, localVel)
+                DPD_BROADCAST(int, localType)
 #ifdef INTEL_WORKAROUND
                 // Workaround for bug in Intel's OpenCL for CPUs.
                 MEM_FENCE;
 #endif
                 int atom2 = y*TILE_SIZE+i;
-                if ((x != y || atom1 < atom2) && atom2 < numAtoms) {
-                    mixed3 pos2 = localPos[tbx+i];
+                if (
+#if DPD_PARTICLE_SHUFFLE
+                        atom1 < numAtoms &&
+#endif
+                        (x != y || atom1 < atom2) && atom2 < numAtoms) {
+                    mixed3 pos2 = DPD_READ(localPos, tbx+i);
                     real3 delta = make_real3(pos2.x-pos1.x, pos2.y-pos1.y, pos2.z-pos1.z);
 #ifdef USE_PERIODIC
                     APPLY_PERIODIC_TO_DELTA(delta)
 #endif
-                    processPair(atom1, atom2, delta, vel1, localVel[tbx+i], type1, localType[tbx+i],
+                    processPair(atom1, atom2, delta, vel1, DPD_READ(localVel, tbx+i), type1, DPD_READ(localType, tbx+i),
                                 paddedNumAtoms, (GLOBAL mm_ulong*) velDelta, dt[0].y, kT, numTypes, params, &random,
                                 periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
                 }
@@ -191,7 +229,7 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
     // Second loop: process tiles from the neighbor list.
 
     unsigned int numTiles = interactionCount[0];
-    LOCAL int atomIndices[WORK_GROUP_SIZE];
+    DPD_DECLARE(int, atomIndices);
     LOCAL int nextTile[WORK_GROUP_SIZE/TILE_SIZE];
     for (int tile = warp; tile < numTiles; tile += totalWarps) {
         if (tgx == 0)
@@ -210,14 +248,14 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
             pos1 += halfdt*trimTo3(vel1);
         int type1 = particleType[atom1];
         int atom2 = interactingAtoms[tileIndex*TILE_SIZE+tgx];
-        atomIndices[LOCAL_ID] = atom2;
+        DPD_LOCAL(atomIndices) = atom2;
         mixed4 vel2 = velm[atom2];
         mixed3 pos2 = loadPos(posq, posqCorrection, atom2);
         if (vel2.w != 0)
             pos2 += halfdt*trimTo3(vel2);
-        localVel[LOCAL_ID] = vel2;
-        localPos[LOCAL_ID] = pos2;
-        localType[LOCAL_ID] = particleType[atom2];
+        DPD_LOCAL(localVel) = vel2;
+        DPD_LOCAL(localPos) = pos2;
+        DPD_LOCAL(localType) = particleType[atom2];
 #ifdef USE_PERIODIC
         if (singlePeriodicCopy) {
             // The box is small enough that we can just translate all the atoms into a single periodic
@@ -225,19 +263,30 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
 
             real4 blockCenterX = blockCenter[x];
             APPLY_PERIODIC_TO_POS_WITH_CENTER(pos1, blockCenterX)
-            APPLY_PERIODIC_TO_POS_WITH_CENTER(localPos[LOCAL_ID], blockCenterX)
+            APPLY_PERIODIC_TO_POS_WITH_CENTER(DPD_LOCAL(localPos), blockCenterX)
             SYNC_WARPS;
-            if (atom1 < numAtoms) {
+#if !DPD_PARTICLE_SHUFFLE
+            if (atom1 < numAtoms)
+#endif
+            {
                 for (int i = 0; i < TILE_SIZE; i++) {
+                    DPD_BROADCAST(mixed3, localPos)
+                    DPD_BROADCAST(mixed4, localVel)
+                    DPD_BROADCAST(int, localType)
+                    DPD_BROADCAST(int, atomIndices)
 #ifdef INTEL_WORKAROUND
                     // Workaround for bug in Intel's OpenCL for CPUs.
                     MEM_FENCE;
 #endif
-                    int atom2 = atomIndices[tbx+i];
-                    if (atom2 < numAtoms) {
-                        pos2 = localPos[tbx+i];
+                    int atom2 = DPD_READ(atomIndices, tbx+i);
+                    if (
+#if DPD_PARTICLE_SHUFFLE
+                        atom1 < numAtoms &&
+#endif
+                        atom2 < numAtoms) {
+                        pos2 = DPD_READ(localPos, tbx+i);
                         real3 delta = make_real3(pos2.x-pos1.x, pos2.y-pos1.y, pos2.z-pos1.z);
-                        processPair(atom1, atom2, delta, vel1, localVel[tbx+i], type1, localType[tbx+i],
+                        processPair(atom1, atom2, delta, vel1, DPD_READ(localVel, tbx+i), type1, DPD_READ(localType, tbx+i),
                                     paddedNumAtoms, (GLOBAL mm_ulong*) velDelta, dt[0].y, kT, numTypes, params, &random,
                                     periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
                     }
@@ -250,20 +299,31 @@ KERNEL void integrateDPDPart2(int numAtoms, int paddedNumAtoms, GLOBAL const rea
             // We need to apply periodic boundary conditions separately for each interaction.
 
             SYNC_WARPS;
-            if (atom1 < numAtoms) {
+#if !DPD_PARTICLE_SHUFFLE
+            if (atom1 < numAtoms)
+#endif
+            {
                 for (int i = 0; i < TILE_SIZE; i++) {
+                    DPD_BROADCAST(mixed3, localPos)
+                    DPD_BROADCAST(mixed4, localVel)
+                    DPD_BROADCAST(int, localType)
+                    DPD_BROADCAST(int, atomIndices)
 #ifdef INTEL_WORKAROUND
                     // Workaround for bug in Intel's OpenCL for CPUs.
                     MEM_FENCE;
 #endif
-                    int atom2 = atomIndices[tbx+i];
-                    if (atom2 < numAtoms) {
-                        pos2 = localPos[tbx+i];
+                    int atom2 = DPD_READ(atomIndices, tbx+i);
+                    if (
+#if DPD_PARTICLE_SHUFFLE
+                        atom1 < numAtoms &&
+#endif
+                        atom2 < numAtoms) {
+                        pos2 = DPD_READ(localPos, tbx+i);
                         real3 delta = make_real3(pos2.x-pos1.x, pos2.y-pos1.y, pos2.z-pos1.z);
 #ifdef USE_PERIODIC
                         APPLY_PERIODIC_TO_DELTA(delta)
 #endif
-                        processPair(atom1, atom2, delta, vel1, localVel[tbx+i], type1, localType[tbx+i],
+                        processPair(atom1, atom2, delta, vel1, DPD_READ(localVel, tbx+i), type1, DPD_READ(localType, tbx+i),
                                     paddedNumAtoms, (GLOBAL mm_ulong*) velDelta, dt[0].y, kT, numTypes, params, &random,
                                     periodicBoxSize, invPeriodicBoxSize, periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
                     }
