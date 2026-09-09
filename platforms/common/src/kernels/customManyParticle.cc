@@ -286,12 +286,17 @@ KERNEL void computeNeighborStartIndices(GLOBAL int* RESTRICT numNeighborsForAtom
 
         // Perform a parallel prefix sum.
 
+#if defined(__METAL__) && OPENMM_METAL_FAST_CUSTOM_MANY_PARTICLE_NEIGHBOR_SCAN && __METAL_VERSION__ >= 300
+        posBuffer[LOCAL_ID] = metalBlockInclusiveScan(posBuffer[LOCAL_ID], posBuffer);
+        SYNC_THREADS;
+#else
         for (unsigned int step = 1; step < LOCAL_SIZE; step *= 2) {
             unsigned int add = (LOCAL_ID >= step ? posBuffer[LOCAL_ID-step] : 0);
             SYNC_THREADS;
             posBuffer[LOCAL_ID] += add;
             SYNC_THREADS;
         }
+#endif
 
         // Write the results back to global memory.
 
