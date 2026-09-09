@@ -53,5 +53,6 @@ Switches do not raise the selected language version. No performance claim is mad
 | `OPENMM_METAL_RECORD_AND_COMMIT` | Batch up to 64 operations or a synchronization boundary | Commit each operation (default) |
 | `OPENMM_METAL_FAST_MATH` | Safe compilation with independently accuracy-tested native functions | Broad fast math where compatible with numerical safety requirements |
 | `OPENMM_METAL_TUNE_LANGUAGE_VERSION` | Select the highest supported target independently of optimization switches | Limit the target to `OPENMM_METAL_LANGUAGE_VERSION`, still capped by SDK, runtime and GPU support |
+| `OPENMM_METAL_TUNE_FORCE_PIPELINE_MAX_THREADS` | Existing function-based pipeline construction | Supply `OPENMM_METAL_FORCE_PIPELINE_MAX_THREADS` to the compiler for the three tiled Nonbonded/GBSA entry points (default 256) |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
