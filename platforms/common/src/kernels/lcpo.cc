@@ -117,7 +117,7 @@ KERNEL void findNeighbors(real4 periodicBoxSize, real4 invPeriodicBoxSize,
     LOCAL real4 posrCache[FIND_NEIGHBORS_THREAD_BLOCK_SIZE];
     int indexInWarp = LOCAL_ID % WARP_SIZE;
     int warpStart = LOCAL_ID - indexInWarp;
-#if !(defined(__CUDA_ARCH__) || defined(USE_HIP))
+#if !(defined(__CUDA_ARCH__) || defined(USE_HIP) || (defined(__METAL__) && OPENMM_METAL_FAST_LCPO_BALLOT && __METAL_VERSION__ >= 300))
     LOCAL bool includeBlockFlags[FIND_NEIGHBORS_THREAD_BLOCK_SIZE];
 #endif
 
@@ -158,10 +158,18 @@ KERNEL void findNeighbors(real4 periodicBoxSize, real4 invPeriodicBoxSize,
             // potentially containing neighbors of atoms in block1, and checks
             // to see if they are actually neighbors of atom1.
 
-#if defined(__CUDA_ARCH__) || defined(USE_HIP)
+#if defined(__CUDA_ARCH__) || defined(USE_HIP) || (defined(__METAL__) && OPENMM_METAL_FAST_LCPO_BALLOT && __METAL_VERSION__ >= 300)
+#ifdef __METAL__
+            uint includeBlockFlags = uint(simd_vote::vote_t(simd_ballot(includeBlock2)));
+#else
             int includeBlockFlags = BALLOT(includeBlock2);
+#endif
             while (includeBlockFlags != 0) {
+#ifdef __METAL__
+                int i = ctz(includeBlockFlags);
+#else
                 int i = __ffs(includeBlockFlags) - 1;
+#endif
                 includeBlockFlags &= includeBlockFlags - 1;
                 {
 #else
