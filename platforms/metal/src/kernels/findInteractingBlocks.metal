@@ -16,8 +16,13 @@
 #error Metal neighbor lists require a 32-lane SIMD group
 #endif
 
+#if OPENMM_METAL_FAST_FP16_BOUNDS && __METAL_VERSION__ >= 300
+typedef half4 MetalNeighborBound;
+inline MetalNeighborBound metalNeighborStoreBound(float4 value) { return metalBoundsHalf(value); }
+#else
 typedef float4 MetalNeighborBound;
 inline MetalNeighborBound metalNeighborStoreBound(float4 value) { return value; }
+#endif
 
 /** Keep the pre-existing independently selected logarithm accuracy policy. */
 inline float metalNeighborLog(float value) {

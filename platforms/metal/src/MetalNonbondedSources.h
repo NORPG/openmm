@@ -25,10 +25,17 @@ inline std::string nonbondedSource() {
     return MetalKernelSources::nonbonded;
 }
 
+/** @brief Shared by production compression and its boundary-value regression. */
+inline std::string halfBoundsSource() {
+    return MetalKernelSources::neighborHalfBounds;
+}
+
 /** @brief Supply only definitions for introduced native neighbor features. */
 inline std::string neighbors(const std::string& source, bool sparsePairs) {
     return "#define OPENMM_METAL_FAST_BLOCK_BOUNDS "+std::to_string(OPENMM_METAL_FAST_BLOCK_BOUNDS)+"\n"+
+        "#define OPENMM_METAL_FAST_FP16_BOUNDS "+std::to_string(OPENMM_METAL_FAST_FP16_BOUNDS)+"\n"+
         "#define OPENMM_METAL_USE_SPARSE_PAIRS "+std::to_string(sparsePairs ? 1 : 0)+"\n"+
+        "#if OPENMM_METAL_FAST_FP16_BOUNDS && __METAL_VERSION__ >= 300\n"+halfBoundsSource()+"\n#endif\n"+
         source;
 }
 
