@@ -1,5 +1,9 @@
 #define WARP_SIZE 32
 
+#if defined(__METAL__) && OPENMM_METAL_FAST_CONSTANT_POTENTIAL_MATRIX_REDUCTION && __METAL_VERSION__ >= 300
+    #define WARP_SHUFFLE_DOWN(local, offset) simd_shuffle_down(local, offset)
+#endif
+
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
     #define WARP_SHUFFLE(local, index) __shfl_sync(0xffffffff, local, index)
     #define WARP_SHUFFLE_DOWN(local, offset) __shfl_down_sync(0xffffffff, local, offset)
