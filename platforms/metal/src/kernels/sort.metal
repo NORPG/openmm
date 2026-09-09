@@ -56,6 +56,30 @@ KERNEL void sortShortList(device DATA_TYPE* data, uint length, threadgroup DATA_
         data[index] = dataBuffer[index];
 }
 
+// The independent SHORT_LIST_SORT host switch selects this existing full-scan
+// algorithm with 64-thread groups; no implicit selection occurs in the shader.
+KERNEL void sortShortList2(device const DATA_TYPE* dataIn, device DATA_TYPE* dataOut, int length) {
+    threadgroup DATA_TYPE tile[64];
+    const uint lane = _metal.localId;
+    const uint index = _metal.globalId;
+    DATA_TYPE value = dataIn[index < uint(length) ? index : 0u];
+    KEY_TYPE key = metalSortKey(_metal, value);
+    uint destination = 0;
+    for (uint start = 0; start < uint(length); start += _metal.localSize) {
+        uint count = min(_metal.localSize, uint(length)-start);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane < count)
+            tile[lane] = dataIn[start+lane];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint other = 0; other < count; ++other) {
+            KEY_TYPE otherKey = metalSortKey(_metal, tile[other]);
+            if (otherKey < key || (otherKey == key && start+other < index))
+                ++destination;
+        }
+    }
+    if (index < uint(length))
+        dataOut[destination] = value;
+}
 
 KERNEL void computeRange(device const DATA_TYPE* data, uint length, device KEY_TYPE* range,
         threadgroup KEY_TYPE* minBuffer, threadgroup KEY_TYPE* maxBuffer,

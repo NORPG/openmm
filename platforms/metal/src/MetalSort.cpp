@@ -43,6 +43,9 @@
 #include <map>
 #include <string>
 
+#ifndef OPENMM_METAL_FAST_SHORT_LIST_SORT
+#define OPENMM_METAL_FAST_SHORT_LIST_SORT 0
+#endif
 
 using namespace OpenMM;
 using namespace std;
@@ -98,6 +101,20 @@ MetalSort::MetalSort(MetalContext& context, ComputeSortImpl::SortTrait* trait, u
         throw OpenMMException("The Metal sort trait requires too much threadgroup memory");
     int maxShortList = min(1024, maxLocalBuffer);
     isShortList = (length <= maxShortList);
+#if OPENMM_METAL_FAST_SHORT_LIST_SORT
+    // CUDA's alternate short-list algorithm scans in parallel instead of sorting
+    // within one threadgroup. Reuse its existing OpenCL source verbatim. The
+    // kernel has a fixed 64-element local tile and no grid-stride outer loop.
+    useShortList2 = (!useRegisterBitonic && length <= min(3000, MetalContext::ThreadBlockSize*context.getNumThreadBlocks()) &&
+            64*trait->getDataSize() <= maxSharedMem);
+    if (useShortList2) {
+        shortList2Kernel = program->createKernel("sortShortList2");
+        if (shortList2Kernel->getMaxBlockSize() < 64)
+            throw OpenMMException("The Metal short-list scan requires a 64-thread group");
+        for (int i = 0; i < 3; i++)
+            shortList2Kernel->addArg();
+    }
+#endif
     for (rangeKernelSize = 1; rangeKernelSize*2 <= maxRangeSize; rangeKernelSize *= 2)
         ;
     positionsKernelSize = std::min(rangeKernelSize, maxPositionsSize);
@@ -134,6 +151,14 @@ void MetalSort::sort(ArrayInterface& data) {
     if (data.getSize() < 2)
         return;
     ArrayInterface& cldata = data;
+    if (useShortList2) {
+        shortList2Kernel->setArg(0, cldata);
+        shortList2Kernel->setArg(1, buckets);
+        shortList2Kernel->setArg(2, (int) dataLength);
+        shortList2Kernel->execute(dataLength, 64);
+        buckets.copyTo(cldata);
+        return;
+    }
     if (isShortList) {
         shortListKernel->setArg(0, cldata);
         shortListKernel->setArg(1, dataLength);
