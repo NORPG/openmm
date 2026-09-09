@@ -52,5 +52,6 @@ Switches do not raise the selected language version. No performance claim is mad
 | `OPENMM_METAL_FAST_CONSTANT_POTENTIAL_FLOAT_SPREAD` | Fixed-point ConstantPotential PME grid | Common floating-grid spreading |
 | `OPENMM_METAL_RECORD_AND_COMMIT` | Batch up to 64 operations or a synchronization boundary | Commit each operation (default) |
 | `OPENMM_METAL_FAST_MATH` | Safe compilation with independently accuracy-tested native functions | Broad fast math where compatible with numerical safety requirements |
+| `OPENMM_METAL_TUNE_LANGUAGE_VERSION` | Select the highest supported target independently of optimization switches | Limit the target to `OPENMM_METAL_LANGUAGE_VERSION`, still capped by SDK, runtime and GPU support |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.

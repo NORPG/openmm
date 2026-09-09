@@ -128,6 +128,11 @@ MetalContext::MetalContext(const System& system, ContextImpl* simulation, MetalC
                 throw OpenMMException("No Metal device is available");
             if (![impl->device supportsFamily:MTLGPUFamilyApple7])
                 throw OpenMMException("The Metal Platform requires Apple silicon");
+            impl->languageVersion = MetalLanguagePolicy::selectVersion(MetalLanguagePolicy::requestedVersion(),
+                    MetalLanguagePolicy::sdkMaximum(), MetalLanguagePolicy::runtimeMaximum(),
+                    [impl->device supportsFamily:MTLGPUFamilyApple7]);
+            if (impl->languageVersion == 0)
+                throw OpenMMException("The Metal Platform requires MSL 3.0 or newer");
             numComputeUnits = linked == nullptr ? getComputeUnits(impl->device) : linked->getNumComputeUnits();
             // Inner CustomCV/ATM contexts share the parent's stream, just as in
             // OpenCL, so state copies and force evaluation stay device-ordered.
