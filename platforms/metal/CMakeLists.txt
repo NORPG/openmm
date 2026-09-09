@@ -292,7 +292,7 @@ if(BUILD_TESTING)
     add_dependencies(TestMetalPlatform OpenMMMetal)
     add_test(NAME TestMetalPlatform COMMAND TestMetalPlatform)
     set_tests_properties(TestMetalPlatform PROPERTIES SKIP_RETURN_CODE 77 LABELS "Metal")
-    foreach(test IN ITEMS CommonSources Sort FFT3D Primitives)
+    foreach(test IN ITEMS CommonSources SourceAdapter Sort FFT3D Primitives PairwiseOptimizations ReductionOptimizations NonbondedOptimizations LaunchTuning GBSATuning LanguagePolicy)
         add_executable(TestMetal${test} tests/TestMetal${test}.cpp)
         target_include_directories(TestMetal${test} BEFORE PRIVATE
             "${CMAKE_CURRENT_BINARY_DIR}/../common/src" "${CMAKE_CURRENT_BINARY_DIR}/src")
@@ -300,6 +300,30 @@ if(BUILD_TESTING)
         add_test(NAME TestMetal${test} COMMAND TestMetal${test})
         set_tests_properties(TestMetal${test} PROPERTIES SKIP_RETURN_CODE 77)
     endforeach()
+    target_compile_definitions(TestMetalLaunchTuning PRIVATE ${METAL_LAUNCH_TUNING_DEFINITIONS})
+    target_include_directories(TestMetalLanguagePolicy PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(TestMetalLanguagePolicy PRIVATE ${METAL_LANGUAGE_DEFINITIONS} ${METAL_LAUNCH_TUNING_DEFINITIONS}
+        OPENMM_METAL_FAST_MATH=$<BOOL:${OPENMM_METAL_FAST_MATH}>
+        OPENMM_METAL_FAST_FP16_BOUNDS=$<BOOL:${OPENMM_METAL_FAST_FP16_BOUNDS}>
+        OPENMM_METAL_FAST_FP16_BOUNDS_NEXTAFTER=$<BOOL:${OPENMM_METAL_FAST_FP16_BOUNDS_NEXTAFTER}>
+        OPENMM_METAL_FAST_TILED_ACQ_REL_BARRIERS=$<BOOL:${OPENMM_METAL_FAST_TILED_ACQ_REL_BARRIERS}>)
+    target_compile_definitions(TestMetalGBSATuning PRIVATE
+        OPENMM_METAL_FAST_GBSA_BORN_FORCE_FLOAT=$<BOOL:${OPENMM_METAL_FAST_GBSA_BORN_FORCE_FLOAT}>)
+    target_include_directories(TestMetalNonbondedOptimizations PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    foreach(feature IN ITEMS BLOCK_BOUNDS FP16_BOUNDS FP16_BOUNDS_NEXTAFTER NEIGHBOR_BALLOT SPARSE_PAIRS NONBONDED_SHUFFLE)
+        target_compile_definitions(TestMetalNonbondedOptimizations PRIVATE
+            OPENMM_METAL_FAST_${feature}=$<BOOL:${OPENMM_METAL_FAST_${feature}}>)
+    endforeach()
+    target_compile_definitions(TestMetalNonbondedOptimizations PRIVATE
+        OPENMM_METAL_EXPERIMENTAL_NONBONDED_HYBRID=$<BOOL:${OPENMM_METAL_EXPERIMENTAL_NONBONDED_HYBRID}>)
+    foreach(option IN ITEMS CUSTOM_NONBONDED_GROUPS_SHUFFLE CUSTOM_MANY_PARTICLE_BALLOT LCPO_BALLOT)
+        target_compile_definitions(TestMetalSourceAdapter PRIVATE
+            OPENMM_METAL_FAST_${option}=$<BOOL:${OPENMM_METAL_FAST_${option}}>)
+    endforeach()
+    # Reuse the existing single-precision core tests without copying algorithms.
+    target_compile_definitions(TestMetalSourceAdapter PRIVATE
+        OPENMM_METAL_NATIVE_FLOAT_ATOMICS=$<BOOL:${OPENMM_METAL_NATIVE_FLOAT_ATOMICS}>
+        OPENMM_METAL_MINIMIZE_FLOAT_ACCUMULATORS=$<BOOL:${OPENMM_METAL_MINIMIZE_FLOAT_ACCUMULATORS}>)
     set(METAL_CORE_TESTS HarmonicBondForce HarmonicAngleForce PeriodicTorsionForce
         RBTorsionForce CMAPTorsionForce CustomBondForce CustomAngleForce
         CustomTorsionForce CustomExternalForce CustomCompoundBondForce
