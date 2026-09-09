@@ -57,5 +57,6 @@ Switches do not raise the selected language version. No performance claim is mad
 | `OPENMM_METAL_TUNE_FORCE_REQUIRED_THREADS` | No exact-shape pipeline contract | MSL 4.0+ source declares the existing threadgroup size for those three tiled entry points; the host rejects mismatched dispatches |
 | `OPENMM_METAL_FAST_FP16_BOUNDS_NEXTAFTER` | Existing half-bit increment for outward rounding | With FP16 bounds enabled, use MSL 3.1 `nextafter`; older targets retain the original helper |
 | `OPENMM_METAL_TUNE_FORCE_THREADGROUP_SIZE` | Existing device-limited 256-thread force groups | Use `OPENMM_METAL_FORCE_THREADGROUP_SIZE` (64, 128, or 256; default 256) |
+| `OPENMM_METAL_TUNE_FORCE_GROUPS_PER_COMPUTE_UNIT` | Existing six force groups per known GPU compute unit | Use `OPENMM_METAL_FORCE_GROUPS_PER_COMPUTE_UNIT` (1 through 12; default 6) |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
