@@ -27,7 +27,8 @@ inline std::string nonbondedSource() {
 
 /** @brief Supply only definitions for introduced native neighbor features. */
 inline std::string neighbors(const std::string& source, bool sparsePairs) {
-    return "#define OPENMM_METAL_USE_SPARSE_PAIRS "+std::to_string(sparsePairs ? 1 : 0)+"\n"+
+    return "#define OPENMM_METAL_FAST_BLOCK_BOUNDS "+std::to_string(OPENMM_METAL_FAST_BLOCK_BOUNDS)+"\n"+
+        "#define OPENMM_METAL_USE_SPARSE_PAIRS "+std::to_string(sparsePairs ? 1 : 0)+"\n"+
         source;
 }
 

@@ -285,6 +285,10 @@ void MetalNonbondedUtilities::initialize(const System& system) {
         // 64-thread group. Periodic bounds retain OpenCL's ordered per-lane
         // expansion and process 64 blocks per group, even with the switch ON.
         int boundsBlocksPerGroup = 64;
+#if OPENMM_METAL_FAST_BLOCK_BOUNDS
+        if (!usePeriodic)
+            boundsBlocksPerGroup = 2;
+#endif
         numBlockSizes = min((context.getNumAtomBlocks()+boundsBlocksPerGroup-1)/boundsBlocksPerGroup,
                            context.getNumThreadBlocks());
         blockSizeRange.initialize(context, numBlockSizes, 2*elementSize, "blockSizeRange");
@@ -360,7 +364,11 @@ void MetalNonbondedUtilities::prepareInteractions(int forceGroups) {
     // Compute the neighbor list.
 
     setPeriodicBoxArgs(context, kernels.findBlockBoundsKernel, 1);
+#if OPENMM_METAL_FAST_BLOCK_BOUNDS
+    kernels.findBlockBoundsKernel->execute(numBlockSizes*64, 64);
+#else
     kernels.findBlockBoundsKernel->execute(context.getNumAtomBlocks());
+#endif
     kernels.computeSortKeysKernel->execute(context.getNumAtomBlocks());
     if (useLargeBlocks)
         setPeriodicBoxArgs(context, kernels.sortBoxDataKernel, 12);

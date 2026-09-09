@@ -75,6 +75,71 @@ KERNEL void findBlockBounds(int numAtoms, float4 periodicBoxSize, float4 invPeri
     const int globalId = int(_metal.globalId);
     const int globalSize = int(_metal.localSize*_metal.numGroups);
     float minSize = 1e38f, maxSize = 0;
+#if OPENMM_METAL_FAST_BLOCK_BOUNDS && __METAL_VERSION__ >= 300
+    const int lane = localId%32;
+#ifdef USE_PERIODIC
+    // Periodic nearest-image choices depend on the preceding partial box.
+    // One lane therefore expands each block in its original atom order.
+    for (int index = globalId; index*32 < numAtoms; index += globalSize) {
+        int base = index*32;
+        int last = min(base+32, numAtoms);
+        float4 pos = posq[base];
+        pos.xyz = metalNeighborPosition(pos.xyz, float3(0), false, periodicBoxSize, invPeriodicBoxSize,
+                periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
+        float4 minPos = pos, maxPos = pos;
+        for (int atom = base+1; atom < last; atom++) {
+            pos = posq[atom];
+            float4 center = 0.5f*(maxPos+minPos);
+            pos.xyz = metalNeighborPosition(pos.xyz, center.xyz, true, periodicBoxSize, invPeriodicBoxSize,
+                    periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
+            minPos = min(minPos, pos);
+            maxPos = max(maxPos, pos);
+        }
+        float4 width = 0.5f*(maxPos-minPos);
+        float4 center = 0.5f*(maxPos+minPos);
+        center.w = 0;
+        for (int atom = base; atom < last; atom++) {
+            float4 delta = posq[atom]-center;
+            delta.xyz = metalNeighborDelta(delta.xyz, periodicBoxSize, invPeriodicBoxSize,
+                    periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
+            center.w = max(center.w, delta.x*delta.x+delta.y*delta.y+delta.z*delta.z);
+        }
+        center.w = sqrt(center.w);
+        blockCenter[index] = center;
+        blockBoundingBox[index] = width;
+        float size = width.x+width.y+width.z;
+        minSize = min(minSize, size);
+        maxSize = max(maxSize, size);
+    }
+#else
+    // Tail lanes repeat the last atom so all lanes take part in each reduction.
+    for (int index = globalId/32; index*32 < numAtoms; index += globalSize/32) {
+        int count = min(32, numAtoms-index*32);
+        float4 pos = posq[index*32+min(lane, count-1)];
+        float4 minPos = float4(simd_min(pos.x), simd_min(pos.y), simd_min(pos.z), simd_min(pos.w));
+        float4 maxPos = float4(simd_max(pos.x), simd_max(pos.y), simd_max(pos.z), simd_max(pos.w));
+        float4 center = 0.5f*(minPos+maxPos);
+        float4 width = 0.5f*(maxPos-minPos);
+        float4 delta = pos-center;
+        center.w = sqrt(simd_max(dot(delta.xyz, delta.xyz)));
+        if (lane == 0) {
+            blockCenter[index] = center;
+            blockBoundingBox[index] = width;
+        }
+        float size = width.x+width.y+width.z;
+        minSize = min(minSize, size);
+        maxSize = max(maxSize, size);
+    }
+#endif
+    minSize = simd_min(minSize);
+    maxSize = simd_max(maxSize);
+    threadgroup float2 ranges[2];
+    if (lane == 0)
+        ranges[localId/32] = float2(minSize, maxSize);
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    if (localId == 0)
+        blockSizeRange[_metal.groupId] = float2(min(ranges[0].x, ranges[1].x), max(ranges[0].y, ranges[1].y));
+#else
     // Baseline: each thread expands one block serially, with the same periodic
     // image choices and radius expression as the optimized periodic path.
     for (int index = globalId; index*TILE_SIZE < numAtoms; index += globalSize) {
@@ -127,6 +192,7 @@ KERNEL void findBlockBounds(int numAtoms, float4 periodicBoxSize, float4 invPeri
     }
     if (localId == 0)
         blockSizeRange[_metal.groupId] = float2(minBuffer[0], maxBuffer[0]);
+#endif
     if (globalId == 0)
         rebuildNeighborList[0] = 0;
 }

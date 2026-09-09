@@ -39,5 +39,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_GBSA_BORN_SHUFFLE` | Common Born-sum local structs | Register exchange of Born data and secondary sums |
 | `OPENMM_METAL_FAST_GBSA_FORCE_SHUFFLE` | Common GBSA force local structs | Register exchange of force/Born state |
 | `OPENMM_METAL_FAST_GBSA_CHAIN_RULE_GUARD` | Evaluate Common chain-rule math before rejecting inactive pairs | Check the unchanged particle/self/cutoff predicate before reciprocal/logarithm work; tile communication stays outside the guard |
+| `OPENMM_METAL_FAST_BLOCK_BOUNDS` | Serial atom-block bounds | Cooperative nonperiodic bounds; ordered per-lane periodic bounds; SIMD size-range reduction |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
