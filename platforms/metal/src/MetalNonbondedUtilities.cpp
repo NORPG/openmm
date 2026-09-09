@@ -630,7 +630,7 @@ ComputeKernel MetalNonbondedUtilities::createInteractionKernel(const string& sou
     // Registration state selects the built-in template. Caller-provided kernels
     // keep their ABI regardless of whether their text resembles a shared source.
     bool commonTemplate = kernelSource.empty();
-    bool hybrid = false;
+    bool hybrid = OPENMM_METAL_EXPERIMENTAL_NONBONDED_HYBRID && commonTemplate && context.getMetalLanguageVersion() >= 300;
     bool shuffle = OPENMM_METAL_FAST_NONBONDED_SHUFFLE && commonTemplate && !hybrid && context.getMetalLanguageVersion() >= 300;
     bool sparsePairs = canUsePairList && useCutoff;
     // Metal owns its architecture kernel. Host work below supplies only the
@@ -788,6 +788,39 @@ ComputeKernel MetalNonbondedUtilities::createInteractionKernel(const string& sou
         replacements["LOAD_ATOM2_PARAMETERS"] = local.str();
         replacements["CLEAR_LOCAL_PARAMETERS"] = clear.str();
         replacements["SHUFFLE_WARP_DATA"] = rotate.str();
+    }
+    if (hybrid) {
+        // Keep each secondary atom's read-only tuple in its original lane.
+        // The OpenCL template still owns force accumulation and synchronization;
+        // only the tuple lookup is replaced by a fixed-source SIMD gather.
+        stringstream declare, loadLocal1, loadLocal2, clear, gather;
+        for (const ComputeParameterInfo& param : params) {
+            const string name = param.getName();
+            const string value = "hybrid_"+name;
+            const int components = param.getNumComponents();
+            const string zero = components == 1 ? "0" : "make_"+param.getType()+"(0)";
+            declare<<localType(param)<<" "<<value<<" = "<<zero<<";\n";
+            loadLocal1<<value<<" = "<<name<<"1;\n";
+            loadLocal2<<value<<" = "<<globalParameter(param, "j")<<";\n";
+            clear<<value<<" = "<<zero<<";\n";
+            gather<<localType(param)<<" "<<name<<"2 = ";
+            if (components != 1)
+                gather<<"make_"<<param.getType()<<"(";
+            for (int component = 0; component < components; component++) {
+                if (component != 0)
+                    gather<<", ";
+                gather<<"simdShuffle("<<value;
+                if (components != 1)
+                    gather<<"."<<suffixes[component];
+                gather<<", uint(atom2-tbx))";
+            }
+            gather<<(components == 1 ? ";\n" : ");\n");
+        }
+        replacements["DECLARE_LOCAL_PARAMETERS"] = declare.str();
+        replacements["LOAD_LOCAL_PARAMETERS_FROM_1"] = loadLocal1.str();
+        replacements["LOAD_LOCAL_PARAMETERS_FROM_GLOBAL"] = loadLocal2.str();
+        replacements["CLEAR_LOCAL_PARAMETERS"] = clear.str();
+        replacements["LOAD_ATOM2_PARAMETERS"] = gather.str();
     }
     stringstream initDerivs;
     for (int i = 0; i < energyParameterDerivatives.size(); i++)

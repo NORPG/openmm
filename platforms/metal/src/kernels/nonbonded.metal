@@ -12,7 +12,11 @@
 
 // The backend supplies Apple7-or-newer support, complete 32-lane SIMD groups,
 // and a selected language version. Switches never raise that selected version.
+#if defined(__METAL__) && __METAL_VERSION__ >= 300 && OPENMM_METAL_NONBONDED_HYBRID
+#define METAL_NONBONDED_HYBRID 1
+#else
 #define METAL_NONBONDED_HYBRID 0
+#endif
 #if defined(__METAL__) && __METAL_VERSION__ >= 300 && OPENMM_METAL_NONBONDED_SHUFFLE && !METAL_NONBONDED_HYBRID
 #define METAL_NONBONDED_SHUFFLE 1
 #else
@@ -107,11 +111,15 @@ inline void metalNonbondedSaveSparseForce(MetalExecutionContext _metal,
 
 #if !METAL_NONBONDED_SHUFFLE
 struct MetalNonbondedTileData {
+#if !METAL_NONBONDED_HYBRID
     float x, y, z, q;
+#endif
     float fx, fy, fz;
+#if !METAL_NONBONDED_HYBRID
     ATOM_PARAMETER_DATA
 #ifndef PARAMETER_SIZE_IS_EVEN
     float padding;
+#endif
 #endif
 };
 #endif
@@ -159,9 +167,17 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 #ifdef USE_EXCLUSIONS
         uint excl = exclusions[32u*tileIndex+tgx];
 #endif
+#if METAL_NONBONDED_HYBRID
+        float4 hybridPosq = float4(0.0f);
+        DECLARE_LOCAL_PARAMETERS
+#endif
         if (x == y) {
 #if METAL_NONBONDED_SHUFFLE
             float4 shflPosq = posq1;
+#elif METAL_NONBONDED_HYBRID
+            hybridPosq = posq1;
+            LOAD_LOCAL_PARAMETERS_FROM_1
+            metalNonbondedSynchronize();
 #else
             localData[localAtomIndex].x = posq1.x;
             localData[localAtomIndex].y = posq1.y;
@@ -175,6 +191,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 #if METAL_NONBONDED_SHUFFLE
                 float4 posq2;
                 BROADCAST_WARP_DATA
+#elif METAL_NONBONDED_HYBRID
+                float4 posq2 = real_shfl(hybridPosq, j);
+                LOAD_ATOM2_PARAMETERS
 #else
                 float4 posq2 = float4(localData[atom2].x, localData[atom2].y, localData[atom2].z, localData[atom2].q);
 #endif
@@ -185,7 +204,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
                 float r2 = delta.x*delta.x+delta.y*delta.y+delta.z*delta.z;
                 float invR = metalNonbondedReciprocalSqrt(r2);
                 float r = r2*invR;
+#if !METAL_NONBONDED_HYBRID
                 LOAD_ATOM2_PARAMETERS
+#endif
                 atom2 = int(32u*y+j);
 #ifdef USE_EXCLUSIONS
                 bool isExcluded = atom1 >= NUM_ATOMS || uint(atom2) >= NUM_ATOMS || !(excl&1u);
@@ -221,6 +242,8 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
             float4 shflPosq = posq[j];
             float3 shflForce = float3(0.0f);
             DECLARE_LOCAL_PARAMETERS
+#elif METAL_NONBONDED_HYBRID
+            hybridPosq = posq[j];
 #else
             float4 partner = posq[j];
             localData[localAtomIndex].x = partner.x;
@@ -244,6 +267,10 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
                 int atom2 = int(tbx+tj);
 #if METAL_NONBONDED_SHUFFLE
                 float4 posq2 = shflPosq;
+#elif METAL_NONBONDED_HYBRID
+                // Every lane gathers before lane-dependent arithmetic predicates.
+                float4 posq2 = real_shfl(hybridPosq, tj);
+                LOAD_ATOM2_PARAMETERS
 #else
                 float4 posq2 = float4(localData[atom2].x, localData[atom2].y, localData[atom2].z, localData[atom2].q);
 #endif
@@ -257,7 +284,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 #endif
                     float invR = metalNonbondedReciprocalSqrt(r2);
                     float r = r2*invR;
+#if !METAL_NONBONDED_HYBRID
                     LOAD_ATOM2_PARAMETERS
+#endif
                     atom2 = int(32u*y+tj);
 #ifdef USE_EXCLUSIONS
                     bool isExcluded = atom1 >= NUM_ATOMS || uint(atom2) >= NUM_ATOMS || !(excl&1u);
@@ -405,6 +434,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
         const uint shflAtomIndex = j;
         float4 shflPosq = float4(0.0f);
         float3 shflForce = float3(0.0f);
+#elif METAL_NONBONDED_HYBRID
+        float4 hybridPosq = float4(0.0f);
+        atomIndices[localAtomIndex] = j;
 #else
         atomIndices[localAtomIndex] = j;
 #endif
@@ -412,6 +444,8 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
         if (j < PADDED_NUM_ATOMS) {
 #if METAL_NONBONDED_SHUFFLE
             shflPosq = posq[j];
+#elif METAL_NONBONDED_HYBRID
+            hybridPosq = posq[j];
 #else
             float4 partner = posq[j];
             localData[localAtomIndex].x = partner.x;
@@ -442,6 +476,8 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
             APPLY_PERIODIC_TO_POS_WITH_CENTER(posq1, blockCenterX)
 #if METAL_NONBONDED_SHUFFLE
             APPLY_PERIODIC_TO_POS_WITH_CENTER(shflPosq, blockCenterX)
+#elif METAL_NONBONDED_HYBRID
+            APPLY_PERIODIC_TO_POS_WITH_CENTER(hybridPosq, blockCenterX)
 #else
             APPLY_PERIODIC_TO_POS_WITH_CENTER(localData[localAtomIndex], blockCenterX)
 #endif
@@ -455,6 +491,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
             int atom2 = int(tbx+tj);
 #if METAL_NONBONDED_SHUFFLE
             float4 posq2 = shflPosq;
+#elif METAL_NONBONDED_HYBRID
+            float4 posq2 = real_shfl(hybridPosq, tj);
+            LOAD_ATOM2_PARAMETERS
 #else
             float4 posq2 = float4(localData[atom2].x, localData[atom2].y, localData[atom2].z, localData[atom2].q);
 #endif
@@ -470,7 +509,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 #endif
                 float invR = metalNonbondedReciprocalSqrt(r2);
                 float r = r2*invR;
+#if !METAL_NONBONDED_HYBRID
                 LOAD_ATOM2_PARAMETERS
+#endif
 #if METAL_NONBONDED_SHUFFLE
                 atom2 = int(real_shfl(shflAtomIndex, tj));
 #else
