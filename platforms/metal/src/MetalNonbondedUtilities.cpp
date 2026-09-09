@@ -618,7 +618,7 @@ ComputeKernel MetalNonbondedUtilities::createInteractionKernel(const string& sou
     // keep their ABI regardless of whether their text resembles a shared source.
     bool commonTemplate = kernelSource.empty();
     bool hybrid = false;
-    bool shuffle = false;
+    bool shuffle = OPENMM_METAL_FAST_NONBONDED_SHUFFLE && commonTemplate && !hybrid && context.getMetalLanguageVersion() >= 300;
     bool sparsePairs = canUsePairList && useCutoff;
     // Metal owns its architecture kernel. Host work below supplies only the
     // existing parameter and formula data, preserving the Common-facing ABI.
@@ -748,6 +748,34 @@ ComputeKernel MetalNonbondedUtilities::createInteractionKernel(const string& sou
     for (const ComputeParameterInfo& param : params)
         load2Global<<localType(param)<<" "<<param.getName()<<"2 = "<<globalParameter(param, "atom2")<<";\n";
     replacements["LOAD_ATOM2_PARAMETERS_FROM_GLOBAL"] = load2Global.str();
+    if (shuffle) {
+        stringstream broadcast, declare, load, local, clear, rotate;
+        for (const string& component : suffixes) {
+            broadcast<<"posq2."<<component<<" = real_shfl(shflPosq."<<component<<", j);\n";
+            rotate<<"shflPosq."<<component<<" = real_shfl(shflPosq."<<component<<", tgx+1);\n";
+            if (component != "w")
+                rotate<<"shflForce."<<component<<" = real_shfl(shflForce."<<component<<", tgx+1);\n";
+        }
+        for (const ComputeParameterInfo& param : params) {
+            string name = param.getName();
+            broadcast<<localType(param)<<" shfl"<<name<<";\n";
+            declare<<localType(param)<<" shfl"<<name<<";\n";
+            load<<"shfl"<<name<<" = "<<globalParameter(param, "j")<<";\n";
+            local<<localType(param)<<" "<<name<<"2 = shfl"<<name<<";\n";
+            clear<<"shfl"<<name<<" = "<<(param.getNumComponents() == 1 ? "0" : "make_"+param.getType()+"(0)")<<";\n";
+            for (int j = 0; j < param.getNumComponents(); j++) {
+                string component = param.getNumComponents() == 1 ? "" : "."+suffixes[j];
+                broadcast<<"shfl"<<name<<component<<" = real_shfl("<<name<<"1"<<component<<", j);\n";
+                rotate<<"shfl"<<name<<component<<" = real_shfl(shfl"<<name<<component<<", tgx+1);\n";
+            }
+        }
+        replacements["BROADCAST_WARP_DATA"] = broadcast.str();
+        replacements["DECLARE_LOCAL_PARAMETERS"] = declare.str();
+        replacements["LOAD_LOCAL_PARAMETERS_FROM_GLOBAL"] = load.str();
+        replacements["LOAD_ATOM2_PARAMETERS"] = local.str();
+        replacements["CLEAR_LOCAL_PARAMETERS"] = clear.str();
+        replacements["SHUFFLE_WARP_DATA"] = rotate.str();
+    }
     stringstream initDerivs;
     for (int i = 0; i < energyParameterDerivatives.size(); i++)
         initDerivs<<"mixed energyParamDeriv"<<i<<" = 0;\n";

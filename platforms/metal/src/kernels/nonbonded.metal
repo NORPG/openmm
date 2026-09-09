@@ -13,13 +13,21 @@
 // The backend supplies Apple7-or-newer support, complete 32-lane SIMD groups,
 // and a selected language version. Switches never raise that selected version.
 #define METAL_NONBONDED_HYBRID 0
+#if defined(__METAL__) && __METAL_VERSION__ >= 300 && OPENMM_METAL_NONBONDED_SHUFFLE && !METAL_NONBONDED_HYBRID
+#define METAL_NONBONDED_SHUFFLE 1
+#else
 #define METAL_NONBONDED_SHUFFLE 0
+#endif
 #if TILE_SIZE != 32 || FORCE_WORK_GROUP_SIZE%32 != 0
 #error Native Metal nonbonded tiles require complete 32-lane SIMD groups
 #endif
 
 // Preserve the existing formula hook's tiled vector width in each path.
+#if METAL_NONBONDED_SHUFFLE
+typedef float3 MetalNonbondedTileDerivative;
+#else
 typedef float4 MetalNonbondedTileDerivative;
+#endif
 
 // Global force planes keep the existing accumulator ABI. Tile counts and
 // particle indices remain integers in both accumulation modes.
@@ -35,6 +43,19 @@ inline void metalNonbondedSynchronize() {
     simdgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+// Parameter-generation hooks use this pure lane transport helper. The two
+// integer words preserve all signed and unsigned 64-bit parameter bits at 3.0.
+template<class T> inline T real_shfl(T value, uint sourceLane) {
+    return simd_shuffle(value, sourceLane&31u);
+}
+inline ulong real_shfl(ulong value, uint sourceLane) {
+    uint lower = simd_shuffle(uint(value), sourceLane&31u);
+    uint upper = simd_shuffle(uint(value>>32), sourceLane&31u);
+    return ulong(lower)|(ulong(upper)<<32);
+}
+inline long real_shfl(long value, uint sourceLane) {
+    return as_type<long>(real_shfl(as_type<ulong>(value), sourceLane));
+}
 
 inline float metalNonbondedSqrt(float value) {
 #if OPENMM_METAL_USE_NATIVE_SQRT && !defined(OPENMM_METAL_FLOAT_ACCUMULATORS) && !defined(OPENMM_METAL_REQUIRE_SAFE_MATH)
@@ -84,6 +105,7 @@ inline void metalNonbondedSaveSparseForce(MetalExecutionContext _metal,
 }
 #endif
 
+#if !METAL_NONBONDED_SHUFFLE
 struct MetalNonbondedTileData {
     float x, y, z, q;
     float fx, fy, fz;
@@ -92,6 +114,7 @@ struct MetalNonbondedTileData {
     float padding;
 #endif
 };
+#endif
 
 // Entry adaptation supplies the existing argument-buffer boundary and _metal;
 // these native bodies, helper signatures, and explicit calls remain untouched.
@@ -117,7 +140,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
     const uint localAtomIndex = _metal.localId;
     float energy = 0.0f;
     INIT_DERIVATIVES
+#if !METAL_NONBONDED_SHUFFLE
     threadgroup MetalNonbondedTileData localData[FORCE_WORK_GROUP_SIZE];
+#endif
 
     // Exclusion tiles are partitioned by SIMD group. Diagonal tiles visit
     // every partner in lane order; other tiles rotate the secondary owners.
@@ -135,15 +160,24 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
         uint excl = exclusions[32u*tileIndex+tgx];
 #endif
         if (x == y) {
+#if METAL_NONBONDED_SHUFFLE
+            float4 shflPosq = posq1;
+#else
             localData[localAtomIndex].x = posq1.x;
             localData[localAtomIndex].y = posq1.y;
             localData[localAtomIndex].z = posq1.z;
             localData[localAtomIndex].q = posq1.w;
             LOAD_LOCAL_PARAMETERS_FROM_1
             metalNonbondedSynchronize();
+#endif
             for (uint j = 0; j < 32u; ++j) {
                 int atom2 = int(tbx+j);
+#if METAL_NONBONDED_SHUFFLE
+                float4 posq2;
+                BROADCAST_WARP_DATA
+#else
                 float4 posq2 = float4(localData[atom2].x, localData[atom2].y, localData[atom2].z, localData[atom2].q);
+#endif
                 float3 delta = posq2.xyz-posq1.xyz;
 #ifdef USE_PERIODIC
                 APPLY_PERIODIC_TO_DELTA(delta)
@@ -176,21 +210,31 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 #ifdef USE_EXCLUSIONS
                 excl >>= 1;
 #endif
+#if !METAL_NONBONDED_SHUFFLE
                 metalNonbondedSynchronize();
+#endif
             }
         }
         else {
             uint j = 32u*y+tgx;
+#if METAL_NONBONDED_SHUFFLE
+            float4 shflPosq = posq[j];
+            float3 shflForce = float3(0.0f);
+            DECLARE_LOCAL_PARAMETERS
+#else
             float4 partner = posq[j];
             localData[localAtomIndex].x = partner.x;
             localData[localAtomIndex].y = partner.y;
             localData[localAtomIndex].z = partner.z;
             localData[localAtomIndex].q = partner.w;
+#endif
             LOAD_LOCAL_PARAMETERS_FROM_GLOBAL
+#if !METAL_NONBONDED_SHUFFLE
             localData[localAtomIndex].fx = 0.0f;
             localData[localAtomIndex].fy = 0.0f;
             localData[localAtomIndex].fz = 0.0f;
             metalNonbondedSynchronize();
+#endif
 #ifdef USE_EXCLUSIONS
             // Rotate-right has defined behavior even for lane zero.
             excl = (excl>>tgx)|(excl<<((32u-tgx)&31u));
@@ -198,7 +242,11 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
             uint tj = tgx;
             for (j = 0; j < 32u; ++j) {
                 int atom2 = int(tbx+tj);
+#if METAL_NONBONDED_SHUFFLE
+                float4 posq2 = shflPosq;
+#else
                 float4 posq2 = float4(localData[atom2].x, localData[atom2].y, localData[atom2].z, localData[atom2].q);
+#endif
                 float3 delta = posq2.xyz-posq1.xyz;
 #ifdef USE_PERIODIC
                 APPLY_PERIODIC_TO_DELTA(delta)
@@ -233,25 +281,38 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
                     force -= dEdR1.xyz;
                     float3 secondaryForce = dEdR2.xyz;
 #endif
+#if METAL_NONBONDED_SHUFFLE
+                    shflForce += secondaryForce;
+#else
                     localData[tbx+tj].fx += secondaryForce.x;
                     localData[tbx+tj].fy += secondaryForce.y;
                     localData[tbx+tj].fz += secondaryForce.z;
 #endif
+#endif
 #if defined(PRUNE_BY_CUTOFF) && !METAL_NONBONDED_SHUFFLE
                 }
 #endif
+#if METAL_NONBONDED_SHUFFLE
+                SHUFFLE_WARP_DATA
+#else
                 metalNonbondedSynchronize();
+#endif
 #ifdef USE_EXCLUSIONS
                 excl >>= 1;
 #endif
                 tj = (tj+1u)&31u;
             }
+#if defined(INCLUDE_FORCES) && METAL_NONBONDED_SHUFFLE
+            metalNonbondedSaveForce(_metal, forceBuffers, 32u*y+tgx, shflForce);
+#endif
         }
 #ifdef INCLUDE_FORCES
         metalNonbondedSaveForce(_metal, forceBuffers, atom1, force);
+#if !METAL_NONBONDED_SHUFFLE
         if (x != y)
             metalNonbondedSaveForce(_metal, forceBuffers, 32u*y+tgx,
                     float3(localData[localAtomIndex].fx, localData[localAtomIndex].fy, localData[localAtomIndex].fz));
+#endif
 #endif
     }
 
@@ -269,10 +330,16 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
     const int end = int(startTileIndex+ulong(warp+1u)*numTileIndices/totalWarps);
     int skipBase = 0;
     uint currentSkipIndex = tbx;
+#if METAL_NONBONDED_SHUFFLE
+    int skipTile = -1;
+#else
     threadgroup int skipTiles[FORCE_WORK_GROUP_SIZE];
     skipTiles[localAtomIndex] = -1;
 #endif
+#endif
+#if !METAL_NONBONDED_SHUFFLE
     threadgroup uint atomIndices[FORCE_WORK_GROUP_SIZE];
+#endif
     for (; pos < end; ++pos) {
         uint x, y = 0;
         bool singlePeriodicCopy = false;
@@ -291,23 +358,38 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
         }
         x = uint(column);
         y = uint(row);
+#if METAL_NONBONDED_SHUFFLE
+        while (real_shfl(skipTile, 31u) < pos) {
+#else
         metalNonbondedSynchronize();
         while (skipTiles[tbx+31u] < pos) {
             metalNonbondedSynchronize();
+#endif
             int next = end;
             if (skipBase+int(tgx) < NUM_TILES_WITH_EXCLUSIONS) {
                 const int2 excluded = exclusionTiles[skipBase+tgx];
                 next = excluded.x+excluded.y*NUM_BLOCKS-excluded.y*(excluded.y+1)/2;
             }
+#if METAL_NONBONDED_SHUFFLE
+            skipTile = next;
+#else
             skipTiles[localAtomIndex] = next;
             metalNonbondedSynchronize();
+#endif
             skipBase += 32;
             currentSkipIndex = tbx;
         }
+#if METAL_NONBONDED_SHUFFLE
+        while (real_shfl(skipTile, currentSkipIndex-tbx) < pos)
+            ++currentSkipIndex;
+        if (real_shfl(skipTile, currentSkipIndex-tbx) == pos)
+            continue;
+#else
         while (skipTiles[currentSkipIndex] < pos)
             ++currentSkipIndex;
         if (skipTiles[currentSkipIndex] == pos)
             continue;
+#endif
 #endif
         const bool hasExclusions = false;
         const uint atom1 = 32u*x+tgx;
@@ -319,39 +401,63 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 #else
         uint j = 32u*y+tgx;
 #endif
+#if METAL_NONBONDED_SHUFFLE
+        const uint shflAtomIndex = j;
+        float4 shflPosq = float4(0.0f);
+        float3 shflForce = float3(0.0f);
+#else
         atomIndices[localAtomIndex] = j;
+#endif
         DECLARE_LOCAL_PARAMETERS
         if (j < PADDED_NUM_ATOMS) {
+#if METAL_NONBONDED_SHUFFLE
+            shflPosq = posq[j];
+#else
             float4 partner = posq[j];
             localData[localAtomIndex].x = partner.x;
             localData[localAtomIndex].y = partner.y;
             localData[localAtomIndex].z = partner.z;
             localData[localAtomIndex].q = partner.w;
+#endif
             LOAD_LOCAL_PARAMETERS_FROM_GLOBAL
         }
         else {
+#if !METAL_NONBONDED_SHUFFLE && !METAL_NONBONDED_HYBRID
             localData[localAtomIndex].x = 0.0f;
             localData[localAtomIndex].y = 0.0f;
             localData[localAtomIndex].z = 0.0f;
             localData[localAtomIndex].q = 0.0f;
+#endif
             CLEAR_LOCAL_PARAMETERS
         }
+#if !METAL_NONBONDED_SHUFFLE
         localData[localAtomIndex].fx = 0.0f;
         localData[localAtomIndex].fy = 0.0f;
         localData[localAtomIndex].fz = 0.0f;
         metalNonbondedSynchronize();
+#endif
 #ifdef USE_PERIODIC
         if (singlePeriodicCopy) {
             float4 blockCenterX = blockCenter[x];
             APPLY_PERIODIC_TO_POS_WITH_CENTER(posq1, blockCenterX)
+#if METAL_NONBONDED_SHUFFLE
+            APPLY_PERIODIC_TO_POS_WITH_CENTER(shflPosq, blockCenterX)
+#else
             APPLY_PERIODIC_TO_POS_WITH_CENTER(localData[localAtomIndex], blockCenterX)
+#endif
+#if !METAL_NONBONDED_SHUFFLE
             metalNonbondedSynchronize();
+#endif
         }
 #endif
         uint tj = tgx;
         for (j = 0; j < 32u; ++j) {
             int atom2 = int(tbx+tj);
+#if METAL_NONBONDED_SHUFFLE
+            float4 posq2 = shflPosq;
+#else
             float4 posq2 = float4(localData[atom2].x, localData[atom2].y, localData[atom2].z, localData[atom2].q);
+#endif
             float3 delta = posq2.xyz-posq1.xyz;
 #ifdef USE_PERIODIC
             if (!singlePeriodicCopy) {
@@ -365,7 +471,11 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
                 float invR = metalNonbondedReciprocalSqrt(r2);
                 float r = r2*invR;
                 LOAD_ATOM2_PARAMETERS
+#if METAL_NONBONDED_SHUFFLE
+                atom2 = int(real_shfl(shflAtomIndex, tj));
+#else
                 atom2 = int(atomIndices[tbx+tj]);
+#endif
 #ifdef USE_EXCLUSIONS
                 bool isExcluded = atom1 >= NUM_ATOMS || uint(atom2) >= NUM_ATOMS;
 #endif
@@ -388,20 +498,33 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
                 force -= dEdR1.xyz;
                 float3 secondaryForce = dEdR2.xyz;
 #endif
+#if METAL_NONBONDED_SHUFFLE
+                shflForce += secondaryForce;
+#else
                 localData[tbx+tj].fx += secondaryForce.x;
                 localData[tbx+tj].fy += secondaryForce.y;
                 localData[tbx+tj].fz += secondaryForce.z;
 #endif
+#endif
 #if defined(PRUNE_BY_CUTOFF) && !METAL_NONBONDED_SHUFFLE
             }
 #endif
+#if METAL_NONBONDED_SHUFFLE
+            SHUFFLE_WARP_DATA
+#else
             metalNonbondedSynchronize();
+#endif
             tj = (tj+1u)&31u;
         }
 #ifdef INCLUDE_FORCES
         metalNonbondedSaveForce(_metal, forceBuffers, atom1, force);
+#if METAL_NONBONDED_SHUFFLE
+        const uint secondaryAtom = shflAtomIndex;
+        float3 secondaryForce = shflForce;
+#else
         const uint secondaryAtom = atomIndices[localAtomIndex];
         float3 secondaryForce = float3(localData[localAtomIndex].fx, localData[localAtomIndex].fy, localData[localAtomIndex].fz);
+#endif
         if (secondaryAtom < PADDED_NUM_ATOMS)
             metalNonbondedSaveForce(_metal, forceBuffers, secondaryAtom, secondaryForce);
 #endif
