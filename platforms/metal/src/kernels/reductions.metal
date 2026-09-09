@@ -64,3 +64,36 @@ DEVICE real metalReduceGroupValue(real value, LOCAL_ARG volatile real* temp) {
     return result;
 }
 #endif
+
+#if __METAL_VERSION__ >= 300 && (OPENMM_METAL_FAST_LCPO_NEIGHBOR_SCAN || OPENMM_METAL_FAST_CUSTOM_MANY_PARTICLE_NEIGHBOR_SCAN || OPENMM_METAL_FAST_SORT_BUCKET_SCAN)
+/** @brief Inclusive uint scan over at most 1024 threads, with converged shuffles. */
+DEVICE unsigned int metalBlockInclusiveScan(unsigned int value, LOCAL_ARG unsigned int* scratch) {
+    const int lane = LOCAL_ID%32;
+    const int warp = LOCAL_ID/32;
+    const int warps = ((int) LOCAL_SIZE+31)/32;
+    // Read every input before a warp total overwrites the same scratch array.
+    SYNC_THREADS;
+    for (int offset = 1; offset < 32; offset *= 2) {
+        unsigned int other = simd_shuffle_up(value, offset);
+        if (lane >= offset)
+            value += other;
+    }
+    if (lane == 31 || LOCAL_ID == LOCAL_SIZE-1)
+        scratch[warp] = value;
+    SYNC_THREADS;
+    unsigned int total = (LOCAL_ID < warps ? scratch[LOCAL_ID] : 0u);
+    if (warp == 0) {
+        for (int offset = 1; offset < 32; offset *= 2) {
+            unsigned int other = simd_shuffle_up(total, offset);
+            if (lane >= offset)
+                total += other;
+        }
+        if (lane < warps)
+            scratch[lane] = total;
+    }
+    SYNC_THREADS;
+    unsigned int result = value+(warp == 0 ? 0u : scratch[warp-1]);
+    SYNC_THREADS;
+    return result;
+}
+#endif
