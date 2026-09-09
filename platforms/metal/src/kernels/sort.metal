@@ -64,6 +64,40 @@ inline uint metalSortInclusiveScan(MetalExecutionContext _metal, uint value, thr
 
 KERNEL void sortShortList(device DATA_TYPE* data, uint length, threadgroup DATA_TYPE* dataBuffer) {
     const uint lane = _metal.localId;
+#if OPENMM_METAL_FAST_SORT_REGISTER_BITONIC && __METAL_VERSION__ >= 300
+    if (length <= 32 && _metal.localSize == 32) {
+        DATA_TYPE value = lane < length ? data[lane] : static_cast<DATA_TYPE>(MAX_VALUE);
+        uint valid = lane < length ? 1u : 0u;
+        uint originalIndex = lane;
+        for (uint width = 2; width <= 32; width *= 2) {
+            for (ushort distance = ushort(width/2); distance > 0; distance /= 2) {
+                DATA_TYPE other = simd_shuffle_xor(value, distance);
+                uint otherValid = simd_shuffle_xor(valid, distance);
+                uint otherIndex = simd_shuffle_xor(originalIndex, distance);
+                KEY_TYPE key = metalSortKey(_metal, value);
+                KEY_TYPE otherKey = metalSortKey(_metal, other);
+                // NaNs follow finite keys, ties retain the original record order,
+                // and invalid lanes follow all real records. This strict order
+                // prevents both partner lanes from keeping the same payload.
+                bool keyNaN = key != key;
+                bool otherNaN = otherKey != otherKey;
+                bool keyBefore = (!keyNaN && otherNaN) || (!keyNaN && !otherNaN && key < otherKey);
+                bool tied = (keyNaN && otherNaN) || key == otherKey;
+                bool before = valid > otherValid || (valid == otherValid &&
+                        (keyBefore || (tied && originalIndex < otherIndex)));
+                bool keepLower = ((lane&width) == 0) == ((lane&distance) == 0);
+                if (keepLower != before) {
+                    value = other;
+                    valid = otherValid;
+                    originalIndex = otherIndex;
+                }
+            }
+        }
+        if (lane < length)
+            data[lane] = value;
+        return;
+    }
+#endif
     for (uint index = lane; index < length; index += _metal.localSize)
         dataBuffer[index] = data[index];
     threadgroup_barrier(mem_flags::mem_threadgroup);

@@ -67,8 +67,18 @@ MetalSort::MetalSort(MetalContext& context, ComputeSortImpl::SortTrait* trait, u
     defines["MAX_VALUE"] = trait->getMaxValue();
     defines["UNIFORM"] = (uniform ? "1" : "0");
     MetalReductionOptimizations::Settings optimizations = MetalReductionOptimizations::getBuildSettings();
+    // The register primitive accepts scalar/vector 32-bit records. Arbitrary
+    // user structs retain the existing generic local-memory sorting algorithm.
+    const string dataType = trait->getDataType();
+    bool shuffleType = (dataType == "float" || dataType == "int" || dataType == "uint" || dataType == "unsigned int" ||
+            dataType == "float2" || dataType == "int2" || dataType == "uint2" ||
+            dataType == "float4" || dataType == "int4" || dataType == "uint4");
+    optimizations.sortRegisterBitonic &= shuffleType && length <= 32;
+    useRegisterBitonic = optimizations.sortRegisterBitonic;
     // Shader branches select the algorithm; trait values are ordinary defines.
     string source = MetalReductionOptimizations::apply(MetalKernelSources::sort, optimizations);
+    if (useRegisterBitonic)
+        defines["OPENMM_METAL_REQUIRE_SAFE_MATH"] = "1"; // Preserve NaN classification and signed-zero payloads.
     ComputeProgram program = context.compileProgram(source, defines);
     shortListKernel = program->createKernel("sortShortList");
     for (int i = 0; i < 3; i++)
@@ -124,6 +134,11 @@ MetalSort::MetalSort(MetalContext& context, ComputeSortImpl::SortTrait* trait, u
         sortKernelSize /= 2;
     if (sortKernelSize == 0)
         throw OpenMMException("The Metal device cannot execute the sorting kernel");
+    if (useRegisterBitonic) {
+        if (maxSortSize < 32)
+            throw OpenMMException("The Metal register bitonic sort requires a full 32-thread SIMD group");
+        sortKernelSize = 32;
+    }
     if (rangeKernelSize > length)
         rangeKernelSize = length;
     unsigned int targetBucketSize = max(1u, sortKernelSize/2);
