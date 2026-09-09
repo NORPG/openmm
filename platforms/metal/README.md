@@ -6,9 +6,6 @@ Metal does not load architecture sources from OpenCL, CUDA, or HIP.
 An exposed alternative requires its independent switch, selected language support, and runtime eligibility.
 Switches do not raise the selected language version. No performance claim is made.
 
-Command submission is immediate at this stage. Batching is not implemented or exposed.
-Record-and-commit is forced ON even when an existing caller cache requests OFF.
-
 ## Available independent build switches
 
 | Build option | OFF behavior | ON behavior |
@@ -53,5 +50,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_PME_FLOAT_SPREAD` | Fixed-point PME grid | Common floating-grid PME spreading, without the conversion dispatch |
 | `OPENMM_METAL_FAST_LJPME_FLOAT_SPREAD` | Fixed-point grids in LJPME systems | Floating electrostatic and dispersion grids in LJPME systems |
 | `OPENMM_METAL_FAST_CONSTANT_POTENTIAL_FLOAT_SPREAD` | Fixed-point ConstantPotential PME grid | Common floating-grid spreading |
+| `OPENMM_METAL_RECORD_AND_COMMIT` | Batch up to 64 operations or a synchronization boundary | Commit each operation (default) |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
