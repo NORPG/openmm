@@ -41,3 +41,34 @@ inline Atom metalGbsaRotateBorn(Atom data, uint lane) {
     result.bornSum = simdShuffle(data.bornSum, lane);
     return result;
 }
+
+/** @brief Broadcast the Force1 inputs of one lane before pair-validity tests. */
+template <class Atom>
+inline Atom metalGbsaBroadcastForce(Atom data, uint lane) {
+    Atom result = {};
+    result.x = simdShuffle(data.x, lane);
+    result.y = simdShuffle(data.y, lane);
+    result.z = simdShuffle(data.z, lane);
+    result.q = simdShuffle(data.q, lane);
+    result.bornRadius = simdShuffle(data.bornRadius, lane);
+    return result;
+}
+
+/**
+ * @brief Rotate coordinates and all four Force1 accumulators together.
+ * After TILE_SIZE=32 rotations, the accumulated particle returns to its owner.
+ */
+template <class Atom>
+inline Atom metalGbsaRotateForce(Atom data, uint lane) {
+    Atom result;
+    result.x = simdShuffle(data.x, lane);
+    result.y = simdShuffle(data.y, lane);
+    result.z = simdShuffle(data.z, lane);
+    result.q = simdShuffle(data.q, lane);
+    result.fx = simdShuffle(data.fx, lane);
+    result.fy = simdShuffle(data.fy, lane);
+    result.fz = simdShuffle(data.fz, lane);
+    result.fw = simdShuffle(data.fw, lane);
+    result.bornRadius = simdShuffle(data.bornRadius, lane);
+    return result;
+}

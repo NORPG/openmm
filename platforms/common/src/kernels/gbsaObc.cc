@@ -443,6 +443,26 @@ typedef struct ALIGN {
     real bornRadius;
 } AtomData2;
 
+/*
+ * The formulas below are shared by all platforms.  These hooks select only
+ * lane transport: local arrays by default, or Metal's register shuffle path.
+ */
+#if USE_GBSA_FORCE_SHUFFLE
+#if TILE_SIZE != 32
+#error GBSA register transport requires TILE_SIZE=32
+#endif
+#define GBSA_FORCE_DATA(index) localData
+#define GBSA_FORCE_DIAGONAL_DATA(index) broadcastData
+#define GBSA_FORCE_ATOM_INDEX(index) atomIndices
+#define GBSA_FORCE_SKIP_TILE(index) simdShuffle(skipTile, (unsigned int) ((index)-tbx))
+#else
+#define GBSA_FORCE_DATA(index) localData[index]
+#define GBSA_FORCE_DIAGONAL_DATA(index) localData[tbx+index]
+#define GBSA_FORCE_ATOM_INDEX(index) atomIndices[index]
+#define GBSA_FORCE_SKIP_TILE(index) skipTiles[index]
+#endif
+
+
 /**
  * First part of computing the GBSA interaction.
  */
@@ -464,7 +484,12 @@ KERNEL void computeGBSAForce1(
     const unsigned int tgx = LOCAL_ID & (TILE_SIZE-1);
     const unsigned int tbx = LOCAL_ID - tgx;
     mixed energy = 0;
+#if USE_GBSA_FORCE_SHUFFLE
+    AtomData2 localData = {};
+    int atomIndices = 0;
+#else
     LOCAL AtomData2 localData[FORCE_WORK_GROUP_SIZE];
+#endif
 
     // First loop: process tiles that contain exclusions.
     
@@ -482,16 +507,22 @@ KERNEL void computeGBSAForce1(
         if (x == y) {
             // This tile is on the diagonal.
 
-            localData[LOCAL_ID].x = posq1.x;
-            localData[LOCAL_ID].y = posq1.y;
-            localData[LOCAL_ID].z = posq1.z;
-            localData[LOCAL_ID].q = charge1;
-            localData[LOCAL_ID].bornRadius = bornRadius1;
+            GBSA_FORCE_DATA(LOCAL_ID).x = posq1.x;
+            GBSA_FORCE_DATA(LOCAL_ID).y = posq1.y;
+            GBSA_FORCE_DATA(LOCAL_ID).z = posq1.z;
+            GBSA_FORCE_DATA(LOCAL_ID).q = charge1;
+            GBSA_FORCE_DATA(LOCAL_ID).bornRadius = bornRadius1;
+#if !USE_GBSA_FORCE_SHUFFLE
             SYNC_WARPS;
+#endif
             for (unsigned int j = 0; j < TILE_SIZE; j++) {
+#if USE_GBSA_FORCE_SHUFFLE
+                // Every lane broadcasts before any particle-validity branch.
+                AtomData2 broadcastData = metalGbsaBroadcastForce(localData, j);
+#endif
                 if (atom1 < NUM_ATOMS && y*TILE_SIZE+j < NUM_ATOMS) {
-                    real3 pos2 = make_real3(localData[tbx+j].x, localData[tbx+j].y, localData[tbx+j].z);
-                    real charge2 = localData[tbx+j].q;
+                    real3 pos2 = make_real3(GBSA_FORCE_DIAGONAL_DATA(j).x, GBSA_FORCE_DIAGONAL_DATA(j).y, GBSA_FORCE_DIAGONAL_DATA(j).z);
+                    real charge2 = GBSA_FORCE_DIAGONAL_DATA(j).q;
                     real3 delta = make_real3(pos2.x-posq1.x, pos2.y-posq1.y, pos2.z-posq1.z);
 #ifdef USE_PERIODIC
                     APPLY_PERIODIC_TO_DELTA(delta)
@@ -502,7 +533,7 @@ KERNEL void computeGBSAForce1(
 #endif
                         real invR = RSQRT(r2);
                         real r = r2*invR;
-                        real bornRadius2 = localData[tbx+j].bornRadius;
+                        real bornRadius2 = GBSA_FORCE_DIAGONAL_DATA(j).bornRadius;
                         real alpha2_ij = bornRadius1*bornRadius2;
                         real D_ij = r2*RECIP(4.0f*alpha2_ij);
                         real expTerm = EXP(-D_ij);
@@ -528,7 +559,9 @@ KERNEL void computeGBSAForce1(
                     }
 #endif
                 }
+#if !USE_GBSA_FORCE_SHUFFLE
                 SYNC_WARPS;
+#endif
             }
         }
         else {
@@ -536,21 +569,23 @@ KERNEL void computeGBSAForce1(
 
             unsigned int j = y*TILE_SIZE + tgx;
             real4 tempPosq = posq[j];
-            localData[LOCAL_ID].x = tempPosq.x;
-            localData[LOCAL_ID].y = tempPosq.y;
-            localData[LOCAL_ID].z = tempPosq.z;
-            localData[LOCAL_ID].q = charge[j];
-            localData[LOCAL_ID].bornRadius = global_bornRadii[j];
-            localData[LOCAL_ID].fx = 0.0f;
-            localData[LOCAL_ID].fy = 0.0f;
-            localData[LOCAL_ID].fz = 0.0f;
-            localData[LOCAL_ID].fw = 0.0f;
+            GBSA_FORCE_DATA(LOCAL_ID).x = tempPosq.x;
+            GBSA_FORCE_DATA(LOCAL_ID).y = tempPosq.y;
+            GBSA_FORCE_DATA(LOCAL_ID).z = tempPosq.z;
+            GBSA_FORCE_DATA(LOCAL_ID).q = charge[j];
+            GBSA_FORCE_DATA(LOCAL_ID).bornRadius = global_bornRadii[j];
+            GBSA_FORCE_DATA(LOCAL_ID).fx = 0.0f;
+            GBSA_FORCE_DATA(LOCAL_ID).fy = 0.0f;
+            GBSA_FORCE_DATA(LOCAL_ID).fz = 0.0f;
+            GBSA_FORCE_DATA(LOCAL_ID).fw = 0.0f;
+#if !USE_GBSA_FORCE_SHUFFLE
             SYNC_WARPS;
+#endif
             unsigned int tj = tgx;
             for (j = 0; j < TILE_SIZE; j++) {
                 if (atom1 < NUM_ATOMS && y*TILE_SIZE+tj < NUM_ATOMS) {
-                    real3 pos2 = make_real3(localData[tbx+tj].x, localData[tbx+tj].y, localData[tbx+tj].z);
-                    real charge2 = localData[tbx+tj].q;
+                    real3 pos2 = make_real3(GBSA_FORCE_DATA(tbx+tj).x, GBSA_FORCE_DATA(tbx+tj).y, GBSA_FORCE_DATA(tbx+tj).z);
+                    real charge2 = GBSA_FORCE_DATA(tbx+tj).q;
                     real3 delta = make_real3(pos2.x-posq1.x, pos2.y-posq1.y, pos2.z-posq1.z);
 #ifdef USE_PERIODIC
                     APPLY_PERIODIC_TO_DELTA(delta)
@@ -561,7 +596,7 @@ KERNEL void computeGBSAForce1(
 #endif
                         real invR = RSQRT(r2);
                         real r = r2*invR;
-                        real bornRadius2 = localData[tbx+tj].bornRadius;
+                        real bornRadius2 = GBSA_FORCE_DATA(tbx+tj).bornRadius;
                         real alpha2_ij = bornRadius1*bornRadius2;
                         real D_ij = r2*RECIP(4.0f*alpha2_ij);
                         real expTerm = EXP(-D_ij);
@@ -582,16 +617,22 @@ KERNEL void computeGBSAForce1(
                         force.x -= delta.x;
                         force.y -= delta.y;
                         force.z -= delta.z;
-                        localData[tbx+tj].fx += delta.x;
-                        localData[tbx+tj].fy += delta.y;
-                        localData[tbx+tj].fz += delta.z;
-                        localData[tbx+tj].fw += dGpol_dalpha2_ij*bornRadius1;
+                        GBSA_FORCE_DATA(tbx+tj).fx += delta.x;
+                        GBSA_FORCE_DATA(tbx+tj).fy += delta.y;
+                        GBSA_FORCE_DATA(tbx+tj).fz += delta.z;
+                        GBSA_FORCE_DATA(tbx+tj).fw += dGpol_dalpha2_ij*bornRadius1;
 #ifdef USE_CUTOFF
                     }
 #endif
                 }
                 tj = (tj + 1) & (TILE_SIZE - 1);
+#if USE_GBSA_FORCE_SHUFFLE
+                // Accumulators travel with their secondary particle for a full ring.
+                localData = metalGbsaRotateForce(localData, (tgx+1)&31);
+                atomIndices = simdShuffle(atomIndices, (tgx+1)&31);
+#else
                 SYNC_WARPS;
+#endif
             }
         }
         
@@ -604,10 +645,10 @@ KERNEL void computeGBSAForce1(
         ATOMIC_ADD(&global_bornForce[offset], (mm_ulong) realToFixedPoint(force.w));
         if (x != y) {
             offset = y*TILE_SIZE + tgx;
-            ATOMIC_ADD(&forceBuffers[offset], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fx));
-            ATOMIC_ADD(&forceBuffers[offset+PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fy));
-            ATOMIC_ADD(&forceBuffers[offset+2*PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fz));
-            ATOMIC_ADD(&global_bornForce[offset], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fw));
+            ATOMIC_ADD(&forceBuffers[offset], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fx));
+            ATOMIC_ADD(&forceBuffers[offset+PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fy));
+            ATOMIC_ADD(&forceBuffers[offset+2*PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fz));
+            ATOMIC_ADD(&global_bornForce[offset], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fw));
         }
     }
 
@@ -626,9 +667,15 @@ KERNEL void computeGBSAForce1(
 #endif
     int skipBase = 0;
     int currentSkipIndex = tbx;
+#if !USE_GBSA_FORCE_SHUFFLE
     LOCAL int atomIndices[FORCE_WORK_GROUP_SIZE];
+#endif
+#if USE_GBSA_FORCE_SHUFFLE
+    int skipTile = -1;
+#else
     LOCAL volatile int skipTiles[FORCE_WORK_GROUP_SIZE];
     skipTiles[LOCAL_ID] = -1;
+#endif
 
     while (pos < end) {
         real4 force = make_real4(0);
@@ -654,22 +701,36 @@ KERNEL void computeGBSAForce1(
 
         // Skip over tiles that have exclusions, since they were already processed.
 
+#if !USE_GBSA_FORCE_SHUFFLE
         SYNC_WARPS;
-        while (skipTiles[tbx+TILE_SIZE-1] < pos) {
+#endif
+        while (GBSA_FORCE_SKIP_TILE(tbx+TILE_SIZE-1) < pos) {
+#if !USE_GBSA_FORCE_SHUFFLE
             SYNC_WARPS;
+#endif
             if (skipBase+tgx < NUM_TILES_WITH_EXCLUSIONS) {
                 int2 tile = exclusionTiles[skipBase+tgx];
+#if USE_GBSA_FORCE_SHUFFLE
+                skipTile = tile.x + tile.y*NUM_BLOCKS - tile.y*(tile.y+1)/2;
+#else
                 skipTiles[LOCAL_ID] = tile.x + tile.y*NUM_BLOCKS - tile.y*(tile.y+1)/2;
+#endif
             }
             else
+#if USE_GBSA_FORCE_SHUFFLE
+                skipTile = end;
+#else
                 skipTiles[LOCAL_ID] = end;
+#endif
             skipBase += TILE_SIZE;            
             currentSkipIndex = tbx;
+#if !USE_GBSA_FORCE_SHUFFLE
             SYNC_WARPS;
+#endif
         }
-        while (skipTiles[currentSkipIndex] < pos)
+        while (GBSA_FORCE_SKIP_TILE(currentSkipIndex) < pos)
             currentSkipIndex++;
-        includeTile = (skipTiles[currentSkipIndex] != pos);
+        includeTile = (GBSA_FORCE_SKIP_TILE(currentSkipIndex) != pos);
 #endif
         if (includeTile) {
             unsigned int atom1 = x*TILE_SIZE + tgx;
@@ -684,20 +745,22 @@ KERNEL void computeGBSAForce1(
 #else
             unsigned int j = y*TILE_SIZE + tgx;
 #endif
-            atomIndices[LOCAL_ID] = j;
+            GBSA_FORCE_ATOM_INDEX(LOCAL_ID) = j;
             if (j < PADDED_NUM_ATOMS) {
                 real4 tempPosq = posq[j];
-                localData[LOCAL_ID].x = tempPosq.x;
-                localData[LOCAL_ID].y = tempPosq.y;
-                localData[LOCAL_ID].z = tempPosq.z;
-                localData[LOCAL_ID].q = charge[j];
-                localData[LOCAL_ID].bornRadius = global_bornRadii[j];
-                localData[LOCAL_ID].fx = 0.0f;
-                localData[LOCAL_ID].fy = 0.0f;
-                localData[LOCAL_ID].fz = 0.0f;
-                localData[LOCAL_ID].fw = 0.0f;
+                GBSA_FORCE_DATA(LOCAL_ID).x = tempPosq.x;
+                GBSA_FORCE_DATA(LOCAL_ID).y = tempPosq.y;
+                GBSA_FORCE_DATA(LOCAL_ID).z = tempPosq.z;
+                GBSA_FORCE_DATA(LOCAL_ID).q = charge[j];
+                GBSA_FORCE_DATA(LOCAL_ID).bornRadius = global_bornRadii[j];
+                GBSA_FORCE_DATA(LOCAL_ID).fx = 0.0f;
+                GBSA_FORCE_DATA(LOCAL_ID).fy = 0.0f;
+                GBSA_FORCE_DATA(LOCAL_ID).fz = 0.0f;
+                GBSA_FORCE_DATA(LOCAL_ID).fw = 0.0f;
             }
+#if !USE_GBSA_FORCE_SHUFFLE
             SYNC_WARPS;
+#endif
 #ifdef USE_PERIODIC
             if (singlePeriodicCopy) {
                 // The box is small enough that we can just translate all the atoms into a single periodic
@@ -705,20 +768,22 @@ KERNEL void computeGBSAForce1(
 
                 real4 blockCenterX = blockCenter[x];
                 APPLY_PERIODIC_TO_POS_WITH_CENTER(posq1, blockCenterX)
-                APPLY_PERIODIC_TO_POS_WITH_CENTER(localData[LOCAL_ID], blockCenterX)
+                APPLY_PERIODIC_TO_POS_WITH_CENTER(GBSA_FORCE_DATA(LOCAL_ID), blockCenterX)
+#if !USE_GBSA_FORCE_SHUFFLE
                 SYNC_WARPS;
+#endif
                 unsigned int tj = tgx;
                 for (j = 0; j < TILE_SIZE; j++) {
-                    int atom2 = atomIndices[tbx+tj];
+                    int atom2 = GBSA_FORCE_ATOM_INDEX(tbx+tj);
                     if (atom1 < NUM_ATOMS && atom2 < NUM_ATOMS) {
-                        real3 pos2 = make_real3(localData[tbx+tj].x, localData[tbx+tj].y, localData[tbx+tj].z);
-                        real charge2 = localData[tbx+tj].q;
+                        real3 pos2 = make_real3(GBSA_FORCE_DATA(tbx+tj).x, GBSA_FORCE_DATA(tbx+tj).y, GBSA_FORCE_DATA(tbx+tj).z);
+                        real charge2 = GBSA_FORCE_DATA(tbx+tj).q;
                         real3 delta = make_real3(pos2.x-posq1.x, pos2.y-posq1.y, pos2.z-posq1.z);
                         real r2 = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
                         if (r2 < CUTOFF_SQUARED) {
                             real invR = RSQRT(r2);
                             real r = r2*invR;
-                            real bornRadius2 = localData[tbx+tj].bornRadius;
+                            real bornRadius2 = GBSA_FORCE_DATA(tbx+tj).bornRadius;
                             real alpha2_ij = bornRadius1*bornRadius2;
                             real D_ij = r2*RECIP(4.0f*alpha2_ij);
                             real expTerm = EXP(-D_ij);
@@ -739,14 +804,20 @@ KERNEL void computeGBSAForce1(
                             force.x -= delta.x;
                             force.y -= delta.y;
                             force.z -= delta.z;
-                            localData[tbx+tj].fx += delta.x;
-                            localData[tbx+tj].fy += delta.y;
-                            localData[tbx+tj].fz += delta.z;
-                            localData[tbx+tj].fw += dGpol_dalpha2_ij*bornRadius1;
+                            GBSA_FORCE_DATA(tbx+tj).fx += delta.x;
+                            GBSA_FORCE_DATA(tbx+tj).fy += delta.y;
+                            GBSA_FORCE_DATA(tbx+tj).fz += delta.z;
+                            GBSA_FORCE_DATA(tbx+tj).fw += dGpol_dalpha2_ij*bornRadius1;
                         }
                     }
                     tj = (tj + 1) & (TILE_SIZE - 1);
+#if USE_GBSA_FORCE_SHUFFLE
+                    // Accumulators travel with their secondary particle for a full ring.
+                    localData = metalGbsaRotateForce(localData, (tgx+1)&31);
+                    atomIndices = simdShuffle(atomIndices, (tgx+1)&31);
+#else
                     SYNC_WARPS;
+#endif
                 }
             }
             else
@@ -756,10 +827,10 @@ KERNEL void computeGBSAForce1(
 
                 unsigned int tj = tgx;
                 for (j = 0; j < TILE_SIZE; j++) {
-                    int atom2 = atomIndices[tbx+tj];
+                    int atom2 = GBSA_FORCE_ATOM_INDEX(tbx+tj);
                     if (atom1 < NUM_ATOMS && atom2 < NUM_ATOMS) {
-                        real3 pos2 = make_real3(localData[tbx+tj].x, localData[tbx+tj].y, localData[tbx+tj].z);
-                        real charge2 = localData[tbx+tj].q;
+                        real3 pos2 = make_real3(GBSA_FORCE_DATA(tbx+tj).x, GBSA_FORCE_DATA(tbx+tj).y, GBSA_FORCE_DATA(tbx+tj).z);
+                        real charge2 = GBSA_FORCE_DATA(tbx+tj).q;
                         real3 delta = make_real3(pos2.x-posq1.x, pos2.y-posq1.y, pos2.z-posq1.z);
 #ifdef USE_PERIODIC
                         APPLY_PERIODIC_TO_DELTA(delta)
@@ -770,7 +841,7 @@ KERNEL void computeGBSAForce1(
 #endif
                             real invR = RSQRT(r2);
                             real r = r2*invR;
-                            real bornRadius2 = localData[tbx+tj].bornRadius;
+                            real bornRadius2 = GBSA_FORCE_DATA(tbx+tj).bornRadius;
                             real alpha2_ij = bornRadius1*bornRadius2;
                             real D_ij = r2*RECIP(4.0f*alpha2_ij);
                             real expTerm = EXP(-D_ij);
@@ -791,23 +862,29 @@ KERNEL void computeGBSAForce1(
                             force.x -= delta.x;
                             force.y -= delta.y;
                             force.z -= delta.z;
-                            localData[tbx+tj].fx += delta.x;
-                            localData[tbx+tj].fy += delta.y;
-                            localData[tbx+tj].fz += delta.z;
-                            localData[tbx+tj].fw += dGpol_dalpha2_ij*bornRadius1;
+                            GBSA_FORCE_DATA(tbx+tj).fx += delta.x;
+                            GBSA_FORCE_DATA(tbx+tj).fy += delta.y;
+                            GBSA_FORCE_DATA(tbx+tj).fz += delta.z;
+                            GBSA_FORCE_DATA(tbx+tj).fw += dGpol_dalpha2_ij*bornRadius1;
 #ifdef USE_CUTOFF
                         }
 #endif
                     }
                     tj = (tj + 1) & (TILE_SIZE - 1);
+#if USE_GBSA_FORCE_SHUFFLE
+                    // Accumulators travel with their secondary particle for a full ring.
+                    localData = metalGbsaRotateForce(localData, (tgx+1)&31);
+                    atomIndices = simdShuffle(atomIndices, (tgx+1)&31);
+#else
                     SYNC_WARPS;
+#endif
                 }
             }
 
             // Write results.
 
 #ifdef USE_CUTOFF
-            unsigned int atom2 = atomIndices[LOCAL_ID];
+            unsigned int atom2 = GBSA_FORCE_ATOM_INDEX(LOCAL_ID);
 #else
             unsigned int atom2 = y*TILE_SIZE + tgx;
 #endif
@@ -816,13 +893,18 @@ KERNEL void computeGBSAForce1(
             ATOMIC_ADD(&forceBuffers[atom1+2*PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(force.z));
             ATOMIC_ADD(&global_bornForce[atom1], (mm_ulong) realToFixedPoint(force.w));
             if (atom2 < PADDED_NUM_ATOMS) {
-                ATOMIC_ADD(&forceBuffers[atom2], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fx));
-                ATOMIC_ADD(&forceBuffers[atom2+PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fy));
-                ATOMIC_ADD(&forceBuffers[atom2+2*PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fz));
-                ATOMIC_ADD(&global_bornForce[atom2], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].fw));
+                ATOMIC_ADD(&forceBuffers[atom2], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fx));
+                ATOMIC_ADD(&forceBuffers[atom2+PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fy));
+                ATOMIC_ADD(&forceBuffers[atom2+2*PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fz));
+                ATOMIC_ADD(&global_bornForce[atom2], (mm_ulong) realToFixedPoint(GBSA_FORCE_DATA(LOCAL_ID).fw));
             }
         }
         pos++;
     }
     energyBuffer[GLOBAL_ID] += energy;
 }
+
+#undef GBSA_FORCE_DATA
+#undef GBSA_FORCE_DIAGONAL_DATA
+#undef GBSA_FORCE_ATOM_INDEX
+#undef GBSA_FORCE_SKIP_TILE
