@@ -17,5 +17,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_SHORT_LIST_SORT` | Baseline Metal short-list selection | Native Metal parallel short-list kernel |
 | `OPENMM_METAL_FAST_SPARSE_PAIRS` | All interactions in tiles | Native Metal sparse-pair phase |
 | `OPENMM_METAL_FAST_NONBONDED_SHUFFLE` | Metal threadgroup-memory force tiles | Native Metal register/shuffle force tiles |
+| `OPENMM_METAL_FAST_MINIMIZE_SHUFFLE` | Common local-memory reduction | Common CUDA/HIP shuffle reduction in the minimizer only |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
