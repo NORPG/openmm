@@ -30,6 +30,37 @@ inline bool metalSortDirection(MetalExecutionContext _metal, uint index, uint wi
     return ascending;
 }
 
+#if OPENMM_METAL_FAST_SORT_BUCKET_SCAN && __METAL_VERSION__ >= 300
+// Inclusive uint scan, using the existing two-level 32-lane SIMD algorithm.
+inline uint metalSortInclusiveScan(MetalExecutionContext _metal, uint value, threadgroup uint* scratch) {
+    const uint lane = _metal.localId%32;
+    const uint simdGroup = _metal.localId/32;
+    const uint groupCount = (_metal.localSize+31)/32;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (ushort offset = 1; offset < 32; offset *= 2) {
+        uint previous = simd_shuffle_up(value, offset);
+        if (lane >= offset)
+            value += previous;
+    }
+    if (lane == 31 || _metal.localId == _metal.localSize-1)
+        scratch[simdGroup] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint total = _metal.localId < groupCount ? scratch[_metal.localId] : 0u;
+    if (simdGroup == 0) {
+        for (ushort offset = 1; offset < 32; offset *= 2) {
+            uint previous = simd_shuffle_up(total, offset);
+            if (lane >= offset)
+                total += previous;
+        }
+        if (lane < groupCount)
+            scratch[lane] = total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint result = value+(simdGroup == 0 ? 0u : scratch[simdGroup-1]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return result;
+}
+#endif
 
 KERNEL void sortShortList(device DATA_TYPE* data, uint length, threadgroup DATA_TYPE* dataBuffer) {
     const uint lane = _metal.localId;
@@ -197,12 +228,18 @@ KERNEL void computeBucketPositions(uint numBuckets, device uint* bucketOffset, t
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buffer[lane] = bucket < numBuckets ? bucketOffset[bucket] : 0u;
         threadgroup_barrier(mem_flags::mem_threadgroup);
+#if OPENMM_METAL_FAST_SORT_BUCKET_SCAN && __METAL_VERSION__ >= 300
+        uint scanned = metalSortInclusiveScan(_metal, buffer[lane], buffer);
+        buffer[lane] = scanned;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+#else
         for (uint step = 1; step < _metal.localSize; step *= 2) {
             uint add = lane >= step ? buffer[lane-step] : 0u;
             threadgroup_barrier(mem_flags::mem_threadgroup);
             buffer[lane] += add;
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
+#endif
         if (bucket < numBuckets)
             bucketOffset[bucket] = preceding+buffer[lane];
         preceding += buffer[_metal.localSize-1];
