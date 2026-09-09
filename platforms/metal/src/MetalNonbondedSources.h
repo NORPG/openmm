@@ -30,13 +30,19 @@ inline std::string halfBoundsSource() {
     return MetalKernelSources::neighborHalfBounds;
 }
 
-/** @brief Supply only definitions for introduced native neighbor features. */
+/**
+ * @brief Supply native neighbor helpers and independent feature definitions.
+ *
+ * The shader owns the bounds, ballot, storage, and sparse-pair branches.  The
+ * host defines only the independent switches and whether this force supports
+ * sparse pairs; the Common-facing bounding boxes retain their FP32 ABI.
+ */
 inline std::string neighbors(const std::string& source, bool sparsePairs) {
-    return "#define OPENMM_METAL_FAST_BLOCK_BOUNDS "+std::to_string(OPENMM_METAL_FAST_BLOCK_BOUNDS)+"\n"+
-        "#define OPENMM_METAL_FAST_FP16_BOUNDS "+std::to_string(OPENMM_METAL_FAST_FP16_BOUNDS)+"\n"+
-        "#define OPENMM_METAL_USE_SPARSE_PAIRS "+std::to_string(sparsePairs ? 1 : 0)+"\n"+
-        "#if OPENMM_METAL_FAST_FP16_BOUNDS && __METAL_VERSION__ >= 300\n"+halfBoundsSource()+"\n#endif\n"+
-        source;
+    return "#define OPENMM_METAL_FAST_BLOCK_BOUNDS "+std::to_string(OPENMM_METAL_FAST_BLOCK_BOUNDS)+"\n"
+        "#define OPENMM_METAL_FAST_FP16_BOUNDS "+std::to_string(OPENMM_METAL_FAST_FP16_BOUNDS)+"\n"
+        "#define OPENMM_METAL_FAST_NEIGHBOR_BALLOT "+std::to_string(OPENMM_METAL_FAST_NEIGHBOR_BALLOT)+"\n"
+        "#define OPENMM_METAL_USE_SPARSE_PAIRS "+std::to_string(sparsePairs ? 1 : 0)+"\n"
+        "#if OPENMM_METAL_FAST_FP16_BOUNDS && __METAL_VERSION__ >= 300\n"+halfBoundsSource()+"\n#endif\n"+source;
 }
 
 } // namespace MetalNonbondedSources

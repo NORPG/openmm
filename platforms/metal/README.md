@@ -41,5 +41,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_GBSA_CHAIN_RULE_GUARD` | Evaluate Common chain-rule math before rejecting inactive pairs | Check the unchanged particle/self/cutoff predicate before reciprocal/logarithm work; tile communication stays outside the guard |
 | `OPENMM_METAL_FAST_BLOCK_BOUNDS` | Serial atom-block bounds | Cooperative nonperiodic bounds; ordered per-lane periodic bounds; SIMD size-range reduction |
 | `OPENMM_METAL_FAST_FP16_BOUNDS` | Float sorted/large bounding boxes | Conservatively rounded half4 storage; public Common bounds remain float |
+| `OPENMM_METAL_FAST_NEIGHBOR_BALLOT` | Metal local flags and atom prefix sums | SIMD ballot/popcount block iteration and atom compaction |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.

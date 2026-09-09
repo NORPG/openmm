@@ -314,8 +314,10 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
     threadgroup int groupExclusions[MAX_EXCLUSIONS*(GROUP_SIZE/32)];
     threadgroup float3 positions[GROUP_SIZE];
     threadgroup volatile uint tileIndices[GROUP_SIZE/32];
+#if !(OPENMM_METAL_FAST_NEIGHBOR_BALLOT && __METAL_VERSION__ >= 300)
     threadgroup bool includeFlags[GROUP_SIZE];
     threadgroup volatile short2 atomCounts[GROUP_SIZE];
+#endif
 #ifdef USE_LARGE_BLOCKS
     threadgroup bool largeFlags[GROUP_SIZE];
 #endif
@@ -410,12 +412,20 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
                 }
             }
 
+#if OPENMM_METAL_FAST_NEIGHBOR_BALLOT && __METAL_VERSION__ >= 300
+            uint included = uint(simd_vote::vote_t(simd_ballot(include)));
+            while (included != 0) {
+                int selected = ctz(included);
+                included &= included-1;
+                {
+#else
             includeFlags[localId] = include;
             simdgroup_barrier(mem_flags::mem_threadgroup);
             for (int selected = 0; selected < TILE_SIZE; selected++) {
                 while (selected < TILE_SIZE && !includeFlags[simdStart+selected])
                     selected++;
                 if (selected < TILE_SIZE) {
+#endif
                     int y = sortedBlocks[block2Base+selected]&BLOCK_INDEX_MASK;
                     int atom2 = y*TILE_SIZE+lane;
                     float3 pos2 = posq[atom2].xyz;
@@ -482,6 +492,14 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
                     }
 #endif
 
+#if OPENMM_METAL_FAST_NEIGHBOR_BALLOT && __METAL_VERSION__ >= 300
+                    uint atomMask = uint(simd_vote::vote_t(simd_ballot(interacts)));
+                    uint lowerLanes = (1u<<uint(lane))-1u;
+                    if (interacts)
+                        buffer[neighbors+popcount(atomMask&lowerLanes)] = atom2;
+                    neighbors += popcount(atomMask);
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+#else
                     atomCounts[localId].x = interacts ? 1 : 0;
                     simdgroup_barrier(mem_flags::mem_threadgroup);
                     int whichBuffer = 0;
@@ -498,6 +516,7 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
                     if (interacts)
                         buffer[neighbors+atomCounts[localId].y-1] = atom2;
                     neighbors += atomCounts[simdStart+TILE_SIZE-1].y;
+#endif
                     if (neighbors > bufferSize-TILE_SIZE) {
                         uint tiles = neighbors/TILE_SIZE;
                         if (lane == 0)
@@ -515,9 +534,11 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
                         neighbors -= TILE_SIZE*tiles;
                     }
                 }
+#if !(OPENMM_METAL_FAST_NEIGHBOR_BALLOT && __METAL_VERSION__ >= 300)
                 else {
                     simdgroup_barrier(mem_flags::mem_threadgroup);
                 }
+#endif
             }
         }
 
