@@ -75,6 +75,30 @@ static bool hasSourcePolicy(const string& source, const string& policy) {
     return false;
 }
 
+/**
+ * @brief Match the selected Metal device to its public I/O Registry entry.
+ *
+ * Metal has no core-count property. gpu-core-count is best-effort driver data,
+ * not a Metal API contract: missing, malformed, or implausible values retain
+ * the previous launch budget. Never infer a count from a product name.
+ */
+static int getComputeUnits(id<MTLDevice> device) {
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault,
+            IORegistryEntryIDMatching(device.registryID));
+    if (service == IO_OBJECT_NULL)
+        return 0;
+    CFTypeRef property = IORegistryEntryCreateCFProperty(service, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0);
+    IOObjectRelease(service);
+    int count = 0;
+    if (property != nullptr) {
+        if (CFGetTypeID(property) == CFNumberGetTypeID() &&
+                !CFNumberGetValue((CFNumberRef) property, kCFNumberIntType, &count))
+            count = 0;
+        CFRelease(property);
+    }
+    return count > 0 && count <= 1024 ? count : 0;
+}
+
 struct MetalContext::Impl {
     id<MTLDevice> device = nil;
     id<MTLBuffer> pinnedBuffer = nil;
@@ -104,6 +128,7 @@ MetalContext::MetalContext(const System& system, ContextImpl* simulation, MetalC
                 throw OpenMMException("No Metal device is available");
             if (![impl->device supportsFamily:MTLGPUFamilyApple7])
                 throw OpenMMException("The Metal Platform requires Apple silicon");
+            numComputeUnits = linked == nullptr ? getComputeUnits(impl->device) : linked->getNumComputeUnits();
             // Inner CustomCV/ATM contexts share the parent's stream, just as in
             // OpenCL, so state copies and force evaluation stay device-ordered.
             defaultQueue = (linked == nullptr ? createQueue() : linked->getCurrentQueue());
