@@ -3,7 +3,11 @@
  */
 KERNEL void computeGroupCenters(int numParticleGroups, GLOBAL const real4* RESTRICT posq, GLOBAL const int* RESTRICT groupParticles,
         GLOBAL const real* RESTRICT groupWeights, GLOBAL const int* RESTRICT groupOffsets, GLOBAL real4* RESTRICT centerPositions) {
+#if defined(__METAL__) && OPENMM_METAL_FAST_CENTROID_REDUCTION && __METAL_VERSION__ >= 300
+    LOCAL volatile real temp[64];
+#else
     LOCAL volatile real3 temp[64];
+#endif
     for (int group = GROUP_ID; group < numParticleGroups; group += NUM_GROUPS) {
         // The threads in this block work together to compute the center one group.
 
@@ -21,6 +25,13 @@ KERNEL void computeGroupCenters(int numParticleGroups, GLOBAL const real4* RESTR
 
         // Sum the values.
 
+#if defined(__METAL__) && OPENMM_METAL_FAST_CENTROID_REDUCTION && __METAL_VERSION__ >= 300
+        center.x = metalReduceGroupValue(center.x, temp);
+        center.y = metalReduceGroupValue(center.y, temp);
+        center.z = metalReduceGroupValue(center.z, temp);
+        if (LOCAL_ID == 0)
+            centerPositions[group] = make_real4(center.x, center.y, center.z, 0);
+#else
         int thread = LOCAL_ID;
         temp[thread].x = center.x;
         temp[thread].y = center.y;
@@ -58,6 +69,7 @@ KERNEL void computeGroupCenters(int numParticleGroups, GLOBAL const real4* RESTR
         SYNC_WARPS;
         if (thread == 0)
             centerPositions[group] = make_real4(temp[0].x+temp[1].x, temp[0].y+temp[1].y, temp[0].z+temp[1].z, 0);
+#endif
     }
 }
 

@@ -26,3 +26,41 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING    *
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF THE SOFTWARE.*
  * -------------------------------------------------------------------------- */
+
+#if __METAL_VERSION__ >= 300 && (OPENMM_METAL_FAST_CENTROID_REDUCTION || OPENMM_METAL_FAST_RG_REDUCTION || OPENMM_METAL_FAST_RMSD_REDUCTION || OPENMM_METAL_FAST_ORIENTATION_REDUCTION)
+/**
+ * @brief Sum within SIMD groups, then sum their totals using shared scratch.
+ *
+ * Every thread calls this helper.  The final rendezvous protects repeated
+ * reductions that reuse scratch after every lane has read the result.
+ */
+DEVICE real metalReduceGroupValue(real value, LOCAL_ARG volatile real* temp) {
+    const int lane = LOCAL_ID%32;
+    const int warp = LOCAL_ID/32;
+    const int active = min(32, (int) LOCAL_SIZE-32*warp);
+    const int warps = ((int) LOCAL_SIZE+31)/32;
+    for (int offset = 16; offset > 0; offset /= 2) {
+        real other = simd_shuffle_down(value, offset);
+        if (lane+offset < active)
+            value += other;
+    }
+    SYNC_THREADS;
+    if (lane == 0)
+        temp[warp] = value;
+    SYNC_THREADS;
+    value = (LOCAL_ID < warps ? temp[LOCAL_ID] : (real) 0);
+    if (warp == 0) {
+        for (int offset = 16; offset > 0; offset /= 2) {
+            real other = simd_shuffle_down(value, offset);
+            if (lane+offset < min(32, (int) LOCAL_SIZE))
+                value += other;
+        }
+        if (lane == 0)
+            temp[0] = value;
+    }
+    SYNC_THREADS;
+    real result = temp[0];
+    SYNC_THREADS;
+    return result;
+}
+#endif
