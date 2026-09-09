@@ -28,5 +28,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_CENTROID_REDUCTION` | Common centroid local reduction | SIMD reductions with per-group shared partials |
 | `OPENMM_METAL_FAST_RG_REDUCTION` | Common radius-of-gyration local reduction | SIMD reductions with per-group shared partials |
 | `OPENMM_METAL_FAST_RMSD_REDUCTION` | Common RMSD local reduction | SIMD center and correlation reductions |
+| `OPENMM_METAL_FAST_ORIENTATION_REDUCTION` | Common orientation local reduction | SIMD center and correlation reductions |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
