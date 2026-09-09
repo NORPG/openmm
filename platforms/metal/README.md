@@ -15,5 +15,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | --- | --- | --- |
 | `OPENMM_METAL_MINIMIZE_FLOAT_ACCUMULATORS` | Q32.32 minimization with limited range diagnostics; no CPU fallback | Scoped GPU floating accumulators for large-force minimization (default) |
 | `OPENMM_METAL_FAST_SHORT_LIST_SORT` | Baseline Metal short-list selection | Native Metal parallel short-list kernel |
+| `OPENMM_METAL_FAST_SPARSE_PAIRS` | All interactions in tiles | Native Metal sparse-pair phase |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.

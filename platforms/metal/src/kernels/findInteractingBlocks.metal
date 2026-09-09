@@ -204,6 +204,9 @@ KERNEL void sortBoxData(device const uint* sortedBlocks, device const float4* bl
     if (rebuild) {
         rebuildNeighborList[0] = 1;
         interactionCount[0] = 0;
+#if OPENMM_METAL_USE_SPARSE_PAIRS && __METAL_VERSION__ >= 300
+        interactionCount[1] = 0;
+#endif
     }
 }
 
@@ -220,6 +223,9 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
         device const MetalNeighborBound* sortedBlockBoundingBox, device const uint* exclusionIndices,
         device const uint* exclusionRowIndices, device float4* oldPositions,
         device const int* rebuildNeighborList
+#if OPENMM_METAL_USE_SPARSE_PAIRS && __METAL_VERSION__ >= 300
+        , uint maxSinglePairs, device int2* singlePairs
+#endif
 #ifdef USE_LARGE_BLOCKS
         , device float4* largeBlockCenter, device MetalNeighborBound* largeBlockBoundingBox
 #endif
@@ -348,6 +354,9 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
                                 periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
 #endif
                     bool interacts = false;
+#if OPENMM_METAL_USE_SPARSE_PAIRS && __METAL_VERSION__ >= 300
+                    uint pairMask = 0;
+#endif
                     if (atom2 < NUM_ATOMS) {
 #ifdef USE_PERIODIC
                         if (!singlePeriodicCopy) {
@@ -355,19 +364,52 @@ KERNEL void findBlocksWithInteractions(float4 periodicBoxSize, float4 invPeriodi
                                 float3 delta = pos2-positions[simdStart+atom1];
                                 delta = metalNeighborDelta(delta, periodicBoxSize, invPeriodicBoxSize,
                                         periodicBoxVecX, periodicBoxVecY, periodicBoxVecZ);
+#if OPENMM_METAL_USE_SPARSE_PAIRS && __METAL_VERSION__ >= 300
+                                if (x*TILE_SIZE+atom1 < NUM_ATOMS && dot(delta, delta) < PADDED_CUTOFF_SQUARED)
+                                    pairMask |= 1u<<atom1;
+#else
                                 interacts |= (delta.x*delta.x+delta.y*delta.y+delta.z*delta.z < PADDED_CUTOFF_SQUARED);
+#endif
                             }
                         }
                         else {
 #endif
                             for (int atom1 = 0; atom1 < TILE_SIZE; atom1++) {
                                 float3 delta = pos2-positions[simdStart+atom1];
+#if OPENMM_METAL_USE_SPARSE_PAIRS && __METAL_VERSION__ >= 300
+                                if (x*TILE_SIZE+atom1 < NUM_ATOMS && dot(delta, delta) < PADDED_CUTOFF_SQUARED)
+                                    pairMask |= 1u<<atom1;
+#else
                                 interacts |= (delta.x*delta.x+delta.y*delta.y+delta.z*delta.z < PADDED_CUTOFF_SQUARED);
+#endif
                             }
 #ifdef USE_PERIODIC
                         }
 #endif
                     }
+#if OPENMM_METAL_USE_SPARSE_PAIRS && __METAL_VERSION__ >= 300
+                    // Sparse extraction is independent of ballot compaction.
+                    interacts = pairMask != 0;
+                    uint count = popcount(pairMask);
+                    count = count <= 3 ? count : 0;
+                    uint total = simd_sum(count);
+                    uint rank = simd_prefix_exclusive_sum(count);
+                    uint first = 0;
+                    if (total != 0 && lane == 0)
+                        first = metalNeighborReserve(interactionCount+1, total);
+                    first = simd_shuffle(first, 0);
+                    if (count != 0) {
+                        first += rank;
+                        while (pairMask != 0) {
+                            uint atom1 = ctz(pairMask);
+                            pairMask &= pairMask-1;
+                            if (first < maxSinglePairs)
+                                singlePairs[first] = int2(x*TILE_SIZE+atom1, atom2);
+                            first++;
+                        }
+                        interacts = false;
+                    }
+#endif
 
                     atomCounts[localId].x = interacts ? 1 : 0;
                     simdgroup_barrier(mem_flags::mem_threadgroup);

@@ -70,6 +70,19 @@ inline void metalNonbondedSaveForce(MetalExecutionContext _metal,
     metalAtomicAdd(buffer+atom+2*PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.z));
 }
 
+#ifdef USE_SPARSE_PAIRS
+inline void metalNonbondedSaveSparseForce(MetalExecutionContext _metal,
+        device MetalNonbondedAccumulator* buffer, uint atom, float3 value) {
+    // Preserve the existing sparse path's zero guards and conversion-before-
+    // aggregation contract. Floating accumulators use the ordinary float add.
+    if (value.x != 0.0f)
+        metalAtomicAdd(buffer+atom, metalNonbondedEncodeForce(_metal, value.x));
+    if (value.y != 0.0f)
+        metalAtomicAdd(buffer+atom+PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.y));
+    if (value.z != 0.0f)
+        metalAtomicAdd(buffer+atom+2*PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.z));
+}
+#endif
 
 struct MetalNonbondedTileData {
     float x, y, z, q;
@@ -91,6 +104,9 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
         float4 periodicBoxVecX, float4 periodicBoxVecY, float4 periodicBoxVecZ,
         uint maxTiles, device const float4* blockCenter,
         device const float4* blockSize, device const int* interactingAtoms
+#ifdef USE_SPARSE_PAIRS
+        , uint maxSinglePairs, device const int2* singlePairs
+#endif
 #endif
         PARAMETER_ARGUMENTS) {
     const uint totalThreads = _metal.localSize*_metal.numGroups;
@@ -393,6 +409,47 @@ KERNEL void computeNonbonded(device MetalNonbondedAccumulator* forceBuffers,
 
     // Separate sparse pairs retain the direct global parameter loads and the
     // same atom/component ordering for their fixed or floating reductions.
+#ifdef USE_SPARSE_PAIRS
+    const uint pairCount = interactionCount[1];
+    if (pairCount > maxSinglePairs)
+        return;
+    for (uint pairIndex = _metal.globalId; pairIndex < pairCount; pairIndex += totalThreads) {
+        const int2 pair = singlePairs[pairIndex];
+        const int atom1 = pair.x, atom2 = pair.y;
+        float4 posq1 = posq[atom1], posq2 = posq[atom2];
+        LOAD_ATOM1_PARAMETERS
+        LOAD_ATOM2_PARAMETERS_FROM_GLOBAL
+        float3 delta = posq2.xyz-posq1.xyz;
+#ifdef USE_PERIODIC
+        APPLY_PERIODIC_TO_DELTA(delta)
+#endif
+        float r2 = delta.x*delta.x+delta.y*delta.y+delta.z*delta.z;
+        float invR = metalNonbondedReciprocalSqrt(r2);
+        float r = r2*invR;
+        const bool hasExclusions = false;
+        const bool isExcluded = false;
+#ifdef USE_SYMMETRIC
+        float dEdR = 0.0f;
+#else
+        float3 dEdR1 = float3(0.0f), dEdR2 = float3(0.0f);
+#endif
+        float tempEnergy = 0.0f;
+        const float interactionScale = 1.0f;
+        COMPUTE_INTERACTION
+        energy += tempEnergy;
+#ifdef INCLUDE_FORCES
+#ifdef USE_SYMMETRIC
+        float3 firstForce = -delta*dEdR;
+        float3 secondForce = -firstForce;
+#else
+        float3 firstForce = -dEdR1.xyz;
+        float3 secondForce = -dEdR2.xyz;
+#endif
+        metalNonbondedSaveSparseForce(_metal, forceBuffers, uint(atom1), firstForce);
+        metalNonbondedSaveSparseForce(_metal, forceBuffers, uint(atom2), secondForce);
+#endif
+    }
+#endif
 #ifdef INCLUDE_ENERGY
     energyBuffer[_metal.globalId] += energy;
 #endif
