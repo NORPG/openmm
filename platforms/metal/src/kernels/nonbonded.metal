@@ -44,7 +44,11 @@ typedef long MetalNonbondedSignedAccumulator;
 #endif
 
 inline void metalNonbondedSynchronize() {
+#if OPENMM_METAL_USE_TILED_ACQ_REL_BARRIERS && __METAL_VERSION__ >= 410
+    simdgroup_barrier(mem_flags::mem_threadgroup, memory_order_acq_rel, thread_scope_simdgroup);
+#else
     simdgroup_barrier(mem_flags::mem_threadgroup);
+#endif
 }
 
 // Parameter-generation hooks use this pure lane transport helper. The two

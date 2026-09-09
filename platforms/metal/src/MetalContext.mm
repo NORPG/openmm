@@ -467,6 +467,15 @@ ComputeProgram MetalContext::compileProgram(const string source, const map<strin
             allDefines[define.first] = define.second;
         // This is an internal selection result, not a caller-provided override.
         allDefines.erase("OPENMM_METAL_USE_TILED_ACQ_REL_BARRIERS");
+#if OPENMM_METAL_FAST_TILED_ACQ_REL_BARRIERS
+        // Source-owned metadata and generated-program defines declare tile-local
+        // synchronization; the shader still gates the selected MSL operation.
+        auto tiledProgram = defines.find("OPENMM_METAL_TILED_FORCE_PROGRAM");
+        if (commonSource &&
+                (hasSourcePolicy(source, "TILED_SIMD_SYNCHRONIZATION") ||
+                 (tiledProgram != defines.end() && tiledProgram->second == "1")))
+            allDefines["OPENMM_METAL_USE_TILED_ACQ_REL_BARRIERS"] = "1";
+#endif
         if (hasSourcePolicy(source, "PRECISE_MATH"))
             allDefines["OPENMM_METAL_REQUIRE_SAFE_MATH"] = "1";
         if (commonSource && floatingAccumulators)
