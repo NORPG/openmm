@@ -40,7 +40,6 @@ if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "13.0")
 endif()
 enable_language(OBJCXX)
 
-
 option(OPENMM_METAL_RECORD_AND_COMMIT
     "Commit each Metal compute/blit operation instead of batching (no additional CPU wait)" ON)
 option(OPENMM_METAL_MINIMIZE_FLOAT_ACCUMULATORS
@@ -130,7 +129,13 @@ set(METAL_LAUNCH_TUNING_DEFINITIONS
 
 # Each optional algorithm can be compared independently with the OpenCL path.
 set(METAL_OPTIMIZATION_SWITCHES
-    SPARSE_PAIRS NONBONDED_SHUFFLE CENTROID_REDUCTION RG_REDUCTION RMSD_REDUCTION ORIENTATION_REDUCTION LCPO_NEIGHBOR_SCAN CUSTOM_MANY_PARTICLE_NEIGHBOR_SCAN CUSTOM_GB_VALUE_SHUFFLE CUSTOM_GB_ENERGY_SHUFFLE DPD_PARTICLE_SHUFFLE DPD_TILE_BROADCAST CUSTOM_HBOND_SHUFFLE GBSA_BORN_SHUFFLE GBSA_FORCE_SHUFFLE GBSA_CHAIN_RULE_GUARD BLOCK_BOUNDS FP16_BOUNDS NEIGHBOR_BALLOT SORT_BUCKET_SCAN SORT_REGISTER_BITONIC GBSA_BORN_FORCE_FLOAT GBSA_RECIPROCAL_REUSE FP16_BOUNDS_NEXTAFTER TILED_ACQ_REL_BARRIERS)
+    BLOCK_BOUNDS FP16_BOUNDS FP16_BOUNDS_NEXTAFTER TILED_ACQ_REL_BARRIERS NEIGHBOR_BALLOT SPARSE_PAIRS NONBONDED_SHUFFLE
+    CUSTOM_GB_VALUE_SHUFFLE CUSTOM_GB_ENERGY_SHUFFLE GBSA_BORN_SHUFFLE GBSA_FORCE_SHUFFLE GBSA_CHAIN_RULE_GUARD
+    GBSA_BORN_FORCE_FLOAT GBSA_RECIPROCAL_REUSE
+    DPD_PARTICLE_SHUFFLE DPD_TILE_BROADCAST CUSTOM_HBOND_SHUFFLE
+    CENTROID_REDUCTION RG_REDUCTION RMSD_REDUCTION ORIENTATION_REDUCTION
+    LCPO_NEIGHBOR_SCAN CUSTOM_MANY_PARTICLE_NEIGHBOR_SCAN
+    SORT_BUCKET_SCAN SORT_REGISTER_BITONIC)
 foreach(feature IN LISTS METAL_OPTIMIZATION_SWITCHES)
     option(OPENMM_METAL_FAST_${feature} "Enable the independent Metal ${feature} algorithm" OFF)
 endforeach()
@@ -279,6 +284,33 @@ file(GLOB METAL_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 install(FILES ${METAL_HEADERS} DESTINATION include/openmm/metal)
 
 if(BUILD_TESTING)
+    # A standalone, opt-in build target, never timed as part of CTest correctness.
+    get_cmake_property(metalCacheVariables CACHE_VARIABLES)
+    list(SORT metalCacheVariables)
+    set(METAL_BUILD_CONFIGURATION "")
+    foreach(variable IN LISTS metalCacheVariables)
+        get_property(type CACHE ${variable} PROPERTY TYPE)
+        if(variable MATCHES "^OPENMM_METAL_" AND type STREQUAL "BOOL")
+            if(METAL_BUILD_CONFIGURATION)
+                string(APPEND METAL_BUILD_CONFIGURATION ",")
+            endif()
+            if(${variable})
+                string(APPEND METAL_BUILD_CONFIGURATION "\"${variable}\":true")
+            else()
+                string(APPEND METAL_BUILD_CONFIGURATION "\"${variable}\":false")
+            endif()
+        elseif(variable MATCHES "^OPENMM_METAL_FORCE_(THREADGROUP_SIZE|GROUPS_PER_COMPUTE_UNIT|PIPELINE_MAX_THREADS)$" OR
+                variable STREQUAL "OPENMM_METAL_LANGUAGE_VERSION")
+            if(METAL_BUILD_CONFIGURATION)
+                string(APPEND METAL_BUILD_CONFIGURATION ",")
+            endif()
+            string(APPEND METAL_BUILD_CONFIGURATION "\"${variable}\":${${variable}}")
+        endif()
+    endforeach()
+    configure_file(cmake/MetalBuildConfiguration.h.in src/MetalBuildConfiguration.h @ONLY)
+    add_executable(BenchmarkMetal EXCLUDE_FROM_ALL tests/BenchmarkMetal.cpp)
+    target_include_directories(BenchmarkMetal PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/src")
+    target_link_libraries(BenchmarkMetal PRIVATE ${OPENMMMETAL_LIBRARY_NAME})
     if(OPENMM_METAL_EXPERIMENTAL_MATRIX_SCREEN)
         add_executable(TestMetalMatrixScreening tests/TestMetalMatrixScreening.cpp)
         target_include_directories(TestMetalMatrixScreening PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/src")
