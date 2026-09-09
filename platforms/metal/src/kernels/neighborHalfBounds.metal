@@ -15,8 +15,12 @@
  */
 inline half metalBoundHalf(float value) {
     half result = half(value);
+#if OPENMM_METAL_FAST_FP16_BOUNDS_NEXTAFTER && __METAL_VERSION__ >= 310
+    if (float(result) < value) result = nextafter(result, half(INFINITY));
+#else
     ushort bits = as_type<ushort>(result);
     if (float(result) < value) result = as_type<half>(ushort(bits+1));
+#endif
     return result;
 }
 
