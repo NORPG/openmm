@@ -1,5 +1,8 @@
 #define WARP_SIZE 32
 
+#if defined(__METAL__) && OPENMM_METAL_FAST_CONSTANT_POTENTIAL_MATRIX_BROADCAST && __METAL_VERSION__ >= 300
+    #define WARP_SHUFFLE(local, index) simd_shuffle(local, index)
+#endif
 #if defined(__METAL__) && OPENMM_METAL_FAST_CONSTANT_POTENTIAL_MATRIX_REDUCTION && __METAL_VERSION__ >= 300
     #define WARP_SHUFFLE_DOWN(local, offset) simd_shuffle_down(local, offset)
 #endif
