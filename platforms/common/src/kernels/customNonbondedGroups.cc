@@ -13,7 +13,11 @@ typedef struct {
  * every thread.
  */
 DEVICE int reduceMax(int val, LOCAL_ARG int* temp) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+#if defined(__METAL__) && OPENMM_METAL_FAST_CUSTOM_NONBONDED_GROUPS_SHUFFLE && __METAL_VERSION__ >= 300
+    for (int mask = 16; mask > 0; mask /= 2)
+        val = max(val, simd_shuffle_xor(val, mask));
+    return val;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
     // CUDA lets us do this slightly more efficiently by using shuffle operations.
     for (int mask = 16; mask > 0; mask /= 2)
         val = max(val, __shfl_xor_sync(0xffffffff, val, mask));

@@ -22,5 +22,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_CONSTANT_POTENTIAL_CG_REDUCTION` | CG local-memory reductions | Common scalar and compensated `float2` shuffle reductions in CG only |
 | `OPENMM_METAL_FAST_CONSTANT_POTENTIAL_MATRIX_REDUCTION` | Matrix-solver local-memory reduction | Common shuffle reduction in the matrix solver only |
 | `OPENMM_METAL_FAST_CONSTANT_POTENTIAL_MATRIX_BROADCAST` | Matrix-solver local-memory broadcasts | Common lane-shuffle broadcasts in the matrix solver only |
+| `OPENMM_METAL_FAST_CUSTOM_NONBONDED_GROUPS_SHUFFLE` | Interaction-group local-memory maximum | Common CUDA xor-shuffle maximum for CustomNonbonded interaction groups |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
