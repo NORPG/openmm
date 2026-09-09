@@ -1,3 +1,9 @@
+#if defined(__METAL__) && __METAL_VERSION__ >= 300 && USE_CUSTOM_HBOND_SHUFFLE
+#define CUSTOM_HBOND_SHUFFLE 1
+#else
+#define CUSTOM_HBOND_SHUFFLE 0
+#endif
+
 DEVICE void findBoundingBox(GLOBAL const real4* RESTRICT posq, GLOBAL const int4* RESTRICT atoms, int numGroups,
         real4 periodicBoxSize, real4 invPeriodicBoxSize, real4 periodicBoxVecX, real4 periodicBoxVecY, real4 periodicBoxVecZ,
         GLOBAL real4* center, GLOBAL real4* blockSize) {
@@ -98,6 +104,18 @@ typedef struct {
     real3 f1, f2, f3;
 } AcceptorData;
 
+#if CUSTOM_HBOND_SHUFFLE
+#define METAL_HBOND_THREAD thread
+/** Preserve Common's generated indexed force updates in lane-owned storage. */
+struct MetalAcceptorTile {
+    AcceptorData value;
+    METAL_HBOND_THREAD AcceptorData& operator[](uint) METAL_HBOND_THREAD {
+        return value;
+    }
+};
+#undef METAL_HBOND_THREAD
+#endif
+
 /**
  * Compute forces on donors and acceptors.
  */
@@ -115,7 +133,11 @@ KERNEL void computeHbondForces(
     const unsigned int warp = GLOBAL_ID/32;
     const int indexInWarp = GLOBAL_ID%32;
     const int tbx = LOCAL_ID-indexInWarp;
+#if CUSTOM_HBOND_SHUFFLE
+    MetalAcceptorTile localData = {};
+#else
     LOCAL AcceptorData localData[THREAD_BLOCK_SIZE];
+#endif
     mixed energy = 0;
     for (int tile = warp; tile < NUM_DONOR_BLOCKS*NUM_ACCEPTOR_BLOCKS; tile += totalWarps) {
         int donorBlock = tile/NUM_ACCEPTOR_BLOCKS;
@@ -169,14 +191,25 @@ KERNEL void computeHbondForces(
             localData[LOCAL_ID].pos3 = (atoms2.z > -1 ? trimTo3(posq[atoms2.z]) : make_real3(0));
         }
         SYNC_WARPS;
-        if (donorIndex < NUM_DONORS) {
+#if !CUSTOM_HBOND_SHUFFLE
+        if (donorIndex < NUM_DONORS)
+#endif
+        {
             int index = indexInWarp;
             for (int j = 0; j < 32; j++) {
                 int acceptorIndex = acceptorStart+index;
 #ifdef USE_EXCLUSIONS
-                if (acceptorIndex < NUM_ACCEPTORS && acceptorIndex != exclusionIndices.x && acceptorIndex != exclusionIndices.y && acceptorIndex != exclusionIndices.z && acceptorIndex != exclusionIndices.w) {
+                if (
+#if CUSTOM_HBOND_SHUFFLE
+                        donorIndex < NUM_DONORS &&
+#endif
+                        acceptorIndex < NUM_ACCEPTORS && acceptorIndex != exclusionIndices.x && acceptorIndex != exclusionIndices.y && acceptorIndex != exclusionIndices.z && acceptorIndex != exclusionIndices.w) {
 #else
-                if (acceptorIndex < NUM_ACCEPTORS) {
+                if (
+#if CUSTOM_HBOND_SHUFFLE
+                        donorIndex < NUM_DONORS &&
+#endif
+                        acceptorIndex < NUM_ACCEPTORS) {
 #endif
                     // Compute the interaction between a donor and an acceptor.
 
@@ -193,6 +226,15 @@ KERNEL void computeHbondForces(
 #endif
                 }
                 index = (index+1)%32;
+#if CUSTOM_HBOND_SHUFFLE
+                // Rotate forces with acceptor positions, returning to owners at j=32.
+                localData[LOCAL_ID].pos1 = simdShuffle(localData[LOCAL_ID].pos1, (indexInWarp+1)&31);
+                localData[LOCAL_ID].pos2 = simdShuffle(localData[LOCAL_ID].pos2, (indexInWarp+1)&31);
+                localData[LOCAL_ID].pos3 = simdShuffle(localData[LOCAL_ID].pos3, (indexInWarp+1)&31);
+                localData[LOCAL_ID].f1 = simdShuffle(localData[LOCAL_ID].f1, (indexInWarp+1)&31);
+                localData[LOCAL_ID].f2 = simdShuffle(localData[LOCAL_ID].f2, (indexInWarp+1)&31);
+                localData[LOCAL_ID].f3 = simdShuffle(localData[LOCAL_ID].f3, (indexInWarp+1)&31);
+#endif
             }
         }
 
