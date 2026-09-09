@@ -97,11 +97,11 @@ inline void metalNonbondedSaveSparseForce(MetalExecutionContext _metal,
     // Preserve the existing sparse path's zero guards and conversion-before-
     // aggregation contract. Floating accumulators use the ordinary float add.
     if (value.x != 0.0f)
-        metalAtomicAdd(buffer+atom, metalNonbondedEncodeForce(_metal, value.x));
+        metalAccumulateSparseForce(_metal, buffer, atom, metalNonbondedEncodeForce(_metal, value.x));
     if (value.y != 0.0f)
-        metalAtomicAdd(buffer+atom+PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.y));
+        metalAccumulateSparseForce(_metal, buffer, atom+PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.y));
     if (value.z != 0.0f)
-        metalAtomicAdd(buffer+atom+2*PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.z));
+        metalAccumulateSparseForce(_metal, buffer, atom+2*PADDED_NUM_ATOMS, metalNonbondedEncodeForce(_metal, value.z));
 }
 #endif
 

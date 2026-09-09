@@ -44,5 +44,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_NEIGHBOR_BALLOT` | Metal local flags and atom prefix sums | SIMD ballot/popcount block iteration and atom compaction |
 | `OPENMM_METAL_FAST_SORT_BUCKET_SCAN` | Metal bucket shared prefix scan | Hierarchical SIMD prefix scan |
 | `OPENMM_METAL_FAST_SORT_REGISTER_BITONIC` | Existing short-list sort | Register bitonic sort for supported records of up to 32 elements |
+| `OPENMM_METAL_FAST_SPARSE_FORCE_AGGREGATION` | One Q32.32 write per sparse-pair component | Bounded SIMD aggregation of adjacent equal-target, already-quantized contributions; floating mode unchanged |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.

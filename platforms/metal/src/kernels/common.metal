@@ -270,7 +270,34 @@ inline ulong atomicAddUInt64(device ulong*, ulong) = delete;
  * This is not a fetch-add and no result may be read until the dispatch ends.
  */
 inline void metalAccumulateSparseForce(MetalExecutionContext context, device ulong* buffer, uint index, ulong value) {
+#if OPENMM_METAL_FAST_SPARSE_FORCE_AGGREGATION
+    uint lane = context.localId&31u;
+    uint active = simdBallot(true);
+    uint previous = lane == 0 ? lane : lane-1;
+    bool hasPrevious = lane != 0 && (active&(1u<<previous)) != 0;
+    uint previousIndex = simdShuffle(index, hasPrevious ? previous : lane);
+    uint heads = simdBallot(!hasPrevious || index != previousIndex);
+    if (heads == active) {
+        metalAtomicAdd(buffer+index, value);
+        return;
+    }
+    // The head at or before this lane is always active, so clz never sees zero.
+    uint head = 31u-clz(heads&(0xffffffffu>>(31u-lane)));
+    uint distance = lane-head;
+    uint maxDistance = simdReduceMax(distance);
+    for (uint offset = 1; offset <= maxDistance; offset <<= 1) {
+        bool inRun = distance >= offset;
+        ulong preceding = simdShuffle(value, inRun ? lane-offset : lane);
+        if (inRun)
+            value += preceding;
+    }
+    // A run ends immediately before an inactive lane or a new head (or lane 32).
+    uint continued = (active&~heads)>>1;
+    if ((continued&(1u<<lane)) == 0)
+        metalAtomicAdd(buffer+index, value);
+#else
     metalAtomicAdd(buffer+index, value);
+#endif
 }
 /** @brief Floating minimization retains its original atomic ordering and primitive. */
 inline void metalAccumulateSparseForce(MetalExecutionContext context, device float* buffer, uint index, float value) {
