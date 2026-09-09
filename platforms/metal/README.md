@@ -31,5 +31,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_ORIENTATION_REDUCTION` | Common orientation local reduction | SIMD center and correlation reductions |
 | `OPENMM_METAL_FAST_LCPO_NEIGHBOR_SCAN` | Common LCPO shared prefix scan | Hierarchical SIMD prefix scan |
 | `OPENMM_METAL_FAST_CUSTOM_MANY_PARTICLE_NEIGHBOR_SCAN` | Common CustomManyParticle shared prefix scan | Hierarchical SIMD prefix scan |
+| `OPENMM_METAL_FAST_CUSTOM_GB_VALUE_SHUFFLE` | Common CustomGB value local arrays | Register exchange for value, parameters, and secondary accumulators |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
