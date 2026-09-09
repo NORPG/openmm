@@ -469,7 +469,7 @@ ComputeProgram MetalContext::compileProgram(const string source, const map<strin
         // Shader arithmetic policy lives in mathPolicy.metal. Keep only the
         // runtime capability and existing numerical-safety decisions here.
         const bool strictMath = allDefines.count("OPENMM_METAL_REQUIRE_SAFE_MATH") != 0;
-        const bool fastMath = false;
+        const bool fastMath = OPENMM_METAL_FAST_MATH && !floatingAccumulators && !strictMath;
         allDefines["OPENMM_METAL_USE_FAST_MATH"] = fastMath ? "1" : "0";
         if (@available(macOS 15.0, *))
             allDefines["OPENMM_METAL_HAS_MATH_PRAGMAS"] = "1";

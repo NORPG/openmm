@@ -19,5 +19,9 @@
  * not changed by this arithmetic-mode pragma.
  */
 #if OPENMM_METAL_HAS_MATH_PRAGMAS
+#if OPENMM_METAL_USE_FAST_MATH
+#pragma METAL fp math_mode(fast)
+#else
 #pragma METAL fp math_mode(safe)
+#endif
 #endif

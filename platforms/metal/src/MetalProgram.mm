@@ -63,7 +63,7 @@ struct MetalProgram::Impl {
         if (libraries[index] == nil) {
             if (!commonSource || source.empty())
                 throw OpenMMException("Metal program has no Common source for an alternate accumulator ABI");
-            const bool fastMath = false;
+            const bool fastMath = OPENMM_METAL_FAST_MATH && !floating && !strictMath;
             map<string, string> variantDefines = defines;
             variantDefines["OPENMM_METAL_USE_FAST_MATH"] = fastMath ? "1" : "0";
             string code;

@@ -51,5 +51,6 @@ Switches do not raise the selected language version. No performance claim is mad
 | `OPENMM_METAL_FAST_LJPME_FLOAT_SPREAD` | Fixed-point grids in LJPME systems | Floating electrostatic and dispersion grids in LJPME systems |
 | `OPENMM_METAL_FAST_CONSTANT_POTENTIAL_FLOAT_SPREAD` | Fixed-point ConstantPotential PME grid | Common floating-grid spreading |
 | `OPENMM_METAL_RECORD_AND_COMMIT` | Batch up to 64 operations or a synchronization boundary | Commit each operation (default) |
+| `OPENMM_METAL_FAST_MATH` | Safe compilation with independently accuracy-tested native functions | Broad fast math where compatible with numerical safety requirements |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
