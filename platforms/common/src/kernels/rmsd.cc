@@ -5,6 +5,9 @@
  * Sum a value over all threads.
  */
 DEVICE real reduceValue(real value, LOCAL_ARG volatile real* temp) {
+#if defined(__METAL__) && OPENMM_METAL_FAST_RMSD_REDUCTION && __METAL_VERSION__ >= 300
+    return metalReduceGroupValue(value, temp);
+#else
     const int thread = LOCAL_ID;
     SYNC_THREADS;
     temp[thread] = value;
@@ -21,6 +24,7 @@ DEVICE real reduceValue(real value, LOCAL_ARG volatile real* temp) {
         SYNC_THREADS;
     }
     return temp[0];
+#endif
 }
 
 /**
