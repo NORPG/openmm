@@ -14,6 +14,26 @@ typedef struct ALIGN {
     real bornSum;
 } AtomData1;
 
+/*
+ * The formulas below are shared by all platforms.  These hooks select only
+ * lane transport: local arrays by default, or Metal's register shuffle path.
+ */
+#if USE_GBSA_BORN_SHUFFLE
+#if TILE_SIZE != 32
+#error GBSA register transport requires TILE_SIZE=32
+#endif
+#define GBSA_BORN_DATA(index) localData
+#define GBSA_BORN_DIAGONAL_DATA(index) broadcastData
+#define GBSA_BORN_ATOM_INDEX(index) atomIndices
+#define GBSA_BORN_SKIP_TILE(index) simdShuffle(skipTile, (unsigned int) ((index)-tbx))
+#else
+#define GBSA_BORN_DATA(index) localData[index]
+#define GBSA_BORN_DIAGONAL_DATA(index) localData[tbx+index]
+#define GBSA_BORN_ATOM_INDEX(index) atomIndices[index]
+#define GBSA_BORN_SKIP_TILE(index) skipTiles[index]
+#endif
+
+
 /**
  * Compute the Born sum.
  */
@@ -32,7 +52,12 @@ KERNEL void computeBornSum(
     const unsigned int warp = GLOBAL_ID/TILE_SIZE;
     const unsigned int tgx = LOCAL_ID & (TILE_SIZE-1);
     const unsigned int tbx = LOCAL_ID - tgx;
+#if USE_GBSA_BORN_SHUFFLE
+    AtomData1 localData = {};
+    int atomIndices = 0;
+#else
     LOCAL AtomData1 localData[FORCE_WORK_GROUP_SIZE];
+#endif
 
     // First loop: process tiles that contain exclusions.
     
@@ -50,15 +75,21 @@ KERNEL void computeBornSum(
         if (x == y) {
             // This tile is on the diagonal.
 
-            localData[LOCAL_ID].x = posq1.x;
-            localData[LOCAL_ID].y = posq1.y;
-            localData[LOCAL_ID].z = posq1.z;
-            localData[LOCAL_ID].q = charge1;
-            localData[LOCAL_ID].radius = params1.x;
-            localData[LOCAL_ID].scaledRadius = params1.y;
+            GBSA_BORN_DATA(LOCAL_ID).x = posq1.x;
+            GBSA_BORN_DATA(LOCAL_ID).y = posq1.y;
+            GBSA_BORN_DATA(LOCAL_ID).z = posq1.z;
+            GBSA_BORN_DATA(LOCAL_ID).q = charge1;
+            GBSA_BORN_DATA(LOCAL_ID).radius = params1.x;
+            GBSA_BORN_DATA(LOCAL_ID).scaledRadius = params1.y;
+#if !USE_GBSA_BORN_SHUFFLE
             SYNC_WARPS;
+#endif
             for (unsigned int j = 0; j < TILE_SIZE; j++) {
-                real3 delta = make_real3(localData[tbx+j].x-posq1.x, localData[tbx+j].y-posq1.y, localData[tbx+j].z-posq1.z);
+#if USE_GBSA_BORN_SHUFFLE
+                // Every lane broadcasts before any particle-validity branch.
+                AtomData1 broadcastData = metalGbsaBroadcastBorn(localData, j);
+#endif
+                real3 delta = make_real3(GBSA_BORN_DIAGONAL_DATA(j).x-posq1.x, GBSA_BORN_DIAGONAL_DATA(j).y-posq1.y, GBSA_BORN_DIAGONAL_DATA(j).z-posq1.z);
 #ifdef USE_PERIODIC
                 APPLY_PERIODIC_TO_DELTA(delta)
 #endif
@@ -70,7 +101,7 @@ KERNEL void computeBornSum(
 #endif
                     real invR = RSQRT(r2);
                     real r = r2*invR;
-                    float2 params2 = make_float2(localData[tbx+j].radius, localData[tbx+j].scaledRadius);
+                    float2 params2 = make_float2(GBSA_BORN_DIAGONAL_DATA(j).radius, GBSA_BORN_DIAGONAL_DATA(j).scaledRadius);
                     real rScaledRadiusJ = r+params2.y;
                     if ((j != tgx) && (params1.x < rScaledRadiusJ)) {
                         real l_ij = RECIP(max((real) params1.x, fabs(r-params2.y)));
@@ -83,7 +114,9 @@ KERNEL void computeBornSum(
                         bornSum += (params1.x < params2.y-r ? 2.0f*(RECIP(params1.x)-l_ij) : 0);
                     }
                 }
+#if !USE_GBSA_BORN_SHUFFLE
                 SYNC_WARPS;
+#endif
             }
         }
         else {
@@ -91,21 +124,23 @@ KERNEL void computeBornSum(
 
             unsigned int j = y*TILE_SIZE + tgx;
             real4 tempPosq = posq[j];
-            localData[LOCAL_ID].x = tempPosq.x;
-            localData[LOCAL_ID].y = tempPosq.y;
-            localData[LOCAL_ID].z = tempPosq.z;
-            localData[LOCAL_ID].q = charge[j];
+            GBSA_BORN_DATA(LOCAL_ID).x = tempPosq.x;
+            GBSA_BORN_DATA(LOCAL_ID).y = tempPosq.y;
+            GBSA_BORN_DATA(LOCAL_ID).z = tempPosq.z;
+            GBSA_BORN_DATA(LOCAL_ID).q = charge[j];
             float2 tempParams = global_params[j];
-            localData[LOCAL_ID].radius = tempParams.x;
-            localData[LOCAL_ID].scaledRadius = tempParams.y;
-            localData[LOCAL_ID].bornSum = 0.0f;
+            GBSA_BORN_DATA(LOCAL_ID).radius = tempParams.x;
+            GBSA_BORN_DATA(LOCAL_ID).scaledRadius = tempParams.y;
+            GBSA_BORN_DATA(LOCAL_ID).bornSum = 0.0f;
+#if !USE_GBSA_BORN_SHUFFLE
             SYNC_WARPS;
+#endif
 
             // Compute the full set of interactions in this tile.
 
             unsigned int tj = tgx;
             for (j = 0; j < TILE_SIZE; j++) {
-                real3 delta = make_real3(localData[tbx+tj].x-posq1.x, localData[tbx+tj].y-posq1.y, localData[tbx+tj].z-posq1.z);
+                real3 delta = make_real3(GBSA_BORN_DATA(tbx+tj).x-posq1.x, GBSA_BORN_DATA(tbx+tj).y-posq1.y, GBSA_BORN_DATA(tbx+tj).z-posq1.z);
 #ifdef USE_PERIODIC
                 APPLY_PERIODIC_TO_DELTA(delta)
 #endif
@@ -117,7 +152,7 @@ KERNEL void computeBornSum(
 #endif
                     real invR = RSQRT(r2);
                     real r = r2*invR;
-                    float2 params2 = make_float2(localData[tbx+tj].radius, localData[tbx+tj].scaledRadius);
+                    float2 params2 = make_float2(GBSA_BORN_DATA(tbx+tj).radius, GBSA_BORN_DATA(tbx+tj).scaledRadius);
                     real rScaledRadiusJ = r+params2.y;
                     if (params1.x < rScaledRadiusJ) {
                         real l_ij = RECIP(max((real) params1.x, fabs(r-params2.y)));
@@ -139,11 +174,17 @@ KERNEL void computeBornSum(
                         real term = l_ij - u_ij + (0.50f*invR*ratio) + 0.25f*(r*(u_ij2-l_ij2) +
                                          (params1.y*params1.y*invR)*(l_ij2-u_ij2));
                         term += (params2.x < params1.y-r ? 2.0f*(RECIP(params2.x)-l_ij) : 0);
-                        localData[tbx+tj].bornSum += term;
+                        GBSA_BORN_DATA(tbx+tj).bornSum += term;
                     }
                 }
                 tj = (tj + 1) & (TILE_SIZE - 1);
+#if USE_GBSA_BORN_SHUFFLE
+                // Accumulators travel with their secondary particle for a full ring.
+                localData = metalGbsaRotateBorn(localData, (tgx+1)&31);
+                atomIndices = simdShuffle(atomIndices, (tgx+1)&31);
+#else
                 SYNC_WARPS;
+#endif
             }
         }
 
@@ -153,7 +194,7 @@ KERNEL void computeBornSum(
         ATOMIC_ADD(&global_bornSum[offset], (mm_ulong) realToFixedPoint(bornSum));
         if (x != y) {
             offset = y*TILE_SIZE + tgx;
-            ATOMIC_ADD(&global_bornSum[offset], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].bornSum));
+            ATOMIC_ADD(&global_bornSum[offset], (mm_ulong) realToFixedPoint(GBSA_BORN_DATA(LOCAL_ID).bornSum));
         }
     }
 
@@ -172,9 +213,15 @@ KERNEL void computeBornSum(
 #endif
     int skipBase = 0;
     int currentSkipIndex = tbx;
+#if !USE_GBSA_BORN_SHUFFLE
     LOCAL int atomIndices[FORCE_WORK_GROUP_SIZE];
+#endif
+#if USE_GBSA_BORN_SHUFFLE
+    int skipTile = -1;
+#else
     LOCAL volatile int skipTiles[FORCE_WORK_GROUP_SIZE];
     skipTiles[LOCAL_ID] = -1;
+#endif
 
     while (pos < end) {
         real bornSum = 0;
@@ -200,22 +247,36 @@ KERNEL void computeBornSum(
 
         // Skip over tiles that have exclusions, since they were already processed.
 
+#if !USE_GBSA_BORN_SHUFFLE
         SYNC_WARPS;
-        while (skipTiles[tbx+TILE_SIZE-1] < pos) {
+#endif
+        while (GBSA_BORN_SKIP_TILE(tbx+TILE_SIZE-1) < pos) {
+#if !USE_GBSA_BORN_SHUFFLE
             SYNC_WARPS;
+#endif
             if (skipBase+tgx < NUM_TILES_WITH_EXCLUSIONS) {
                 int2 tile = exclusionTiles[skipBase+tgx];
+#if USE_GBSA_BORN_SHUFFLE
+                skipTile = tile.x + tile.y*NUM_BLOCKS - tile.y*(tile.y+1)/2;
+#else
                 skipTiles[LOCAL_ID] = tile.x + tile.y*NUM_BLOCKS - tile.y*(tile.y+1)/2;
+#endif
             }
             else
+#if USE_GBSA_BORN_SHUFFLE
+                skipTile = end;
+#else
                 skipTiles[LOCAL_ID] = end;
+#endif
             skipBase += TILE_SIZE;            
             currentSkipIndex = tbx;
+#if !USE_GBSA_BORN_SHUFFLE
             SYNC_WARPS;
+#endif
         }
-        while (skipTiles[currentSkipIndex] < pos)
+        while (GBSA_BORN_SKIP_TILE(currentSkipIndex) < pos)
             currentSkipIndex++;
-        includeTile = (skipTiles[currentSkipIndex] != pos);
+        includeTile = (GBSA_BORN_SKIP_TILE(currentSkipIndex) != pos);
 #endif
         if (includeTile) {
             unsigned int atom1 = x*TILE_SIZE + tgx;
@@ -230,19 +291,21 @@ KERNEL void computeBornSum(
 #else
             unsigned int j = y*TILE_SIZE + tgx;
 #endif
-            atomIndices[LOCAL_ID] = j;
+            GBSA_BORN_ATOM_INDEX(LOCAL_ID) = j;
             if (j < PADDED_NUM_ATOMS) {
                 real4 tempPosq = posq[j];
-                localData[LOCAL_ID].x = tempPosq.x;
-                localData[LOCAL_ID].y = tempPosq.y;
-                localData[LOCAL_ID].z = tempPosq.z;
-                localData[LOCAL_ID].q = charge[j];
+                GBSA_BORN_DATA(LOCAL_ID).x = tempPosq.x;
+                GBSA_BORN_DATA(LOCAL_ID).y = tempPosq.y;
+                GBSA_BORN_DATA(LOCAL_ID).z = tempPosq.z;
+                GBSA_BORN_DATA(LOCAL_ID).q = charge[j];
                 float2 tempParams = global_params[j];
-                localData[LOCAL_ID].radius = tempParams.x;
-                localData[LOCAL_ID].scaledRadius = tempParams.y;
-                localData[LOCAL_ID].bornSum = 0.0f;
+                GBSA_BORN_DATA(LOCAL_ID).radius = tempParams.x;
+                GBSA_BORN_DATA(LOCAL_ID).scaledRadius = tempParams.y;
+                GBSA_BORN_DATA(LOCAL_ID).bornSum = 0.0f;
             }
+#if !USE_GBSA_BORN_SHUFFLE
             SYNC_WARPS;
+#endif
 #ifdef USE_PERIODIC
             if (singlePeriodicCopy) {
                 // The box is small enough that we can just translate all the atoms into a single periodic
@@ -250,17 +313,19 @@ KERNEL void computeBornSum(
 
                 real4 blockCenterX = blockCenter[x];
                 APPLY_PERIODIC_TO_POS_WITH_CENTER(posq1, blockCenterX)
-                APPLY_PERIODIC_TO_POS_WITH_CENTER(localData[LOCAL_ID], blockCenterX)
+                APPLY_PERIODIC_TO_POS_WITH_CENTER(GBSA_BORN_DATA(LOCAL_ID), blockCenterX)
+#if !USE_GBSA_BORN_SHUFFLE
                 SYNC_WARPS;
+#endif
                 unsigned int tj = tgx;
                 for (j = 0; j < TILE_SIZE; j++) {
-                    real3 delta = make_real3(localData[tbx+tj].x-posq1.x, localData[tbx+tj].y-posq1.y, localData[tbx+tj].z-posq1.z);
+                    real3 delta = make_real3(GBSA_BORN_DATA(tbx+tj).x-posq1.x, GBSA_BORN_DATA(tbx+tj).y-posq1.y, GBSA_BORN_DATA(tbx+tj).z-posq1.z);
                     real r2 = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
-                    int atom2 = atomIndices[tbx+tj];
+                    int atom2 = GBSA_BORN_ATOM_INDEX(tbx+tj);
                     if (atom1 < NUM_ATOMS && atom2 < NUM_ATOMS && r2 < CUTOFF_SQUARED) {
                         real invR = RSQRT(r2);
                         real r = r2*invR;
-                        float2 params2 = make_float2(localData[tbx+tj].radius, localData[tbx+tj].scaledRadius);
+                        float2 params2 = make_float2(GBSA_BORN_DATA(tbx+tj).radius, GBSA_BORN_DATA(tbx+tj).scaledRadius);
                         real rScaledRadiusJ = r+params2.y;
                         if (params1.x < rScaledRadiusJ) {
                             real l_ij = RECIP(max((real) params1.x, fabs(r-params2.y)));
@@ -282,11 +347,17 @@ KERNEL void computeBornSum(
                             real term = l_ij - u_ij + (0.50f*invR*ratio) + 0.25f*(r*(u_ij2-l_ij2) +
                                              (params1.y*params1.y*invR)*(l_ij2-u_ij2));
                             term += (params2.x < params1.y-r ? 2.0f*(RECIP(params2.x)-l_ij) : 0);
-                            localData[tbx+tj].bornSum += term;
+                            GBSA_BORN_DATA(tbx+tj).bornSum += term;
                         }
                     }
                     tj = (tj + 1) & (TILE_SIZE - 1);
+#if USE_GBSA_BORN_SHUFFLE
+                    // Accumulators travel with their secondary particle for a full ring.
+                    localData = metalGbsaRotateBorn(localData, (tgx+1)&31);
+                    atomIndices = simdShuffle(atomIndices, (tgx+1)&31);
+#else
                     SYNC_WARPS;
+#endif
                 }
             }
             else
@@ -296,12 +367,12 @@ KERNEL void computeBornSum(
 
                 unsigned int tj = tgx;
                 for (j = 0; j < TILE_SIZE; j++) {
-                    real3 delta = make_real3(localData[tbx+tj].x-posq1.x, localData[tbx+tj].y-posq1.y, localData[tbx+tj].z-posq1.z);
+                    real3 delta = make_real3(GBSA_BORN_DATA(tbx+tj).x-posq1.x, GBSA_BORN_DATA(tbx+tj).y-posq1.y, GBSA_BORN_DATA(tbx+tj).z-posq1.z);
 #ifdef USE_PERIODIC
                     APPLY_PERIODIC_TO_DELTA(delta)
 #endif
                     real r2 = delta.x*delta.x + delta.y*delta.y + delta.z*delta.z;
-                    int atom2 = atomIndices[tbx+tj];
+                    int atom2 = GBSA_BORN_ATOM_INDEX(tbx+tj);
 #ifdef USE_CUTOFF
                     if (atom1 < NUM_ATOMS && atom2 < NUM_ATOMS && r2 < CUTOFF_SQUARED) {
 #else
@@ -309,7 +380,7 @@ KERNEL void computeBornSum(
 #endif
                         real invR = RSQRT(r2);
                         real r = r2*invR;
-                        float2 params2 = make_float2(localData[tbx+tj].radius, localData[tbx+tj].scaledRadius);
+                        float2 params2 = make_float2(GBSA_BORN_DATA(tbx+tj).radius, GBSA_BORN_DATA(tbx+tj).scaledRadius);
                         real rScaledRadiusJ = r+params2.y;
                         if (params1.x < rScaledRadiusJ) {
                             real l_ij = RECIP(max((real) params1.x, fabs(r-params2.y)));
@@ -331,29 +402,40 @@ KERNEL void computeBornSum(
                             real term = l_ij - u_ij + (0.50f*invR*ratio) + 0.25f*(r*(u_ij2-l_ij2) +
                                              (params1.y*params1.y*invR)*(l_ij2-u_ij2));
                             term += (params2.x < params1.y-r ? 2.0f*(RECIP(params2.x)-l_ij) : 0);
-                            localData[tbx+tj].bornSum += term;
+                            GBSA_BORN_DATA(tbx+tj).bornSum += term;
                         }
                     }
                     tj = (tj + 1) & (TILE_SIZE - 1);
+#if USE_GBSA_BORN_SHUFFLE
+                    // Accumulators travel with their secondary particle for a full ring.
+                    localData = metalGbsaRotateBorn(localData, (tgx+1)&31);
+                    atomIndices = simdShuffle(atomIndices, (tgx+1)&31);
+#else
                     SYNC_WARPS;
+#endif
                 }
             }
 
             // Write results.
 
 #ifdef USE_CUTOFF
-            unsigned int atom2 = atomIndices[LOCAL_ID];
+            unsigned int atom2 = GBSA_BORN_ATOM_INDEX(LOCAL_ID);
 #else
             unsigned int atom2 = y*TILE_SIZE + tgx;
 #endif
             ATOMIC_ADD(&global_bornSum[atom1], (mm_ulong) realToFixedPoint(bornSum));
             if (atom2 < PADDED_NUM_ATOMS)
-                ATOMIC_ADD(&global_bornSum[atom2], (mm_ulong) realToFixedPoint(localData[LOCAL_ID].bornSum));
+                ATOMIC_ADD(&global_bornSum[atom2], (mm_ulong) realToFixedPoint(GBSA_BORN_DATA(LOCAL_ID).bornSum));
         }
         pos++;
     }
 }
 
+
+#undef GBSA_BORN_DATA
+#undef GBSA_BORN_DIAGONAL_DATA
+#undef GBSA_BORN_ATOM_INDEX
+#undef GBSA_BORN_SKIP_TILE
 typedef struct ALIGN {
     real x, y, z;
     real q;
