@@ -101,6 +101,26 @@ void MetalNonbondedUtilities::addInteraction(bool usesCutoff, bool usesPeriodic,
         map<string, string> replacements;
         replacements["CUTOFF"] = "CUTOFF_"+context.intToString(forceGroup);
         replacements["CUTOFF_SQUARED"] = "CUTOFF_"+context.intToString(forceGroup)+"_SQUARED";
+#if OPENMM_METAL_FAST_GBSA_BORN_FORCE_FLOAT
+        // The shared source declares its read-only real-arithmetic parameters.
+        // Unannotated interactions conservatively keep every payload full-width.
+        const set<string> bornNames = MetalPairwiseOptimizations::getGBSAChainRuleBornForceParameters(kernel);
+        bool recognized = bornNames.size() == 2;
+        string parameter;
+        for (const string& name : bornNames) {
+            if (name.size() < 2 || (name.back() != '1' && name.back() != '2')) {
+                recognized = false;
+                break;
+            }
+            const string base = name.substr(0, name.size()-1);
+            if (!parameter.empty() && base != parameter) recognized = false;
+            parameter = base;
+        }
+        if (recognized)
+            floatBornForceParameters.insert(parameter);
+        else
+            otherInteractionSource = "UNDECLARED_PARAMETER_USAGE";
+#endif
         groupKernelSource[forceGroup] += context.replaceStrings(kernel, replacements)+"\n";
     }
 }
@@ -641,6 +661,16 @@ ComputeKernel MetalNonbondedUtilities::createInteractionKernel(const string& sou
     // The float cast is the same promotion used by the original pair multiply;
     // do not move its later 2^-32 scaling or change the accumulation algorithm.
     set<string> floatParameters;
+#if OPENMM_METAL_FAST_GBSA_BORN_FORCE_FLOAT
+    // Without explicit parameter metadata, another interaction may require the
+    // original integer value. No expression or macro-body recognition is used.
+    if (commonTemplate && &params == &parameters && otherInteractionSource.empty()) {
+        for (const ComputeParameterInfo& param : params)
+            if (param.getType() == "mm_long" && param.getNumComponents() == 1 && param.isConstant() &&
+                    floatBornForceParameters.count(param.getName()))
+                floatParameters.insert(param.getName());
+    }
+#endif
     auto nativeType = [commonTemplate](const string& type) -> string {
         if (commonTemplate && type == "mm_long")
             return "MetalNonbondedSignedAccumulator";
@@ -648,15 +678,15 @@ ComputeKernel MetalNonbondedUtilities::createInteractionKernel(const string& sou
             return "MetalNonbondedAccumulator";
         return type;
     };
-    auto localType = [&nativeType](const ComputeParameterInfo& param) -> string {
-        return nativeType(param.getType());
+    auto localType = [&floatParameters, &nativeType](const ComputeParameterInfo& param) -> string {
+        return floatParameters.count(param.getName()) ? "MetalGBSABornForce" : nativeType(param.getType());
     };
     auto globalParameter = [&floatParameters](const ComputeParameterInfo& param, const string& atom) -> string {
         const string base = "global_"+param.getName();
         if (param.getNumComponents() == 3)
             return "make_"+param.getType()+"("+base+"[3*"+atom+"], "+base+"[3*"+atom+"+1], "+base+"[3*"+atom+"+2])";
         const string value = base+"["+atom+"]";
-        return value;
+        return floatParameters.count(param.getName()) ? "metalGBSABornForce("+value+")" : value;
     };
     map<string, string> replacements;
     replacements["COMPUTE_INTERACTION"] = source;

@@ -1,3 +1,6 @@
+// Born-force inputs are read-only and enter real arithmetic before 2^-32 scaling.
+// Keep this parameter metadata accurate when changing the interaction contract.
+// OPENMM_METAL_GBSA_BORN_FORCE_PARAMETERS BORN_FORCE1 BORN_FORCE2
 {
 #if USE_GBSA_CHAIN_RULE_GUARD
 #ifdef USE_CUTOFF

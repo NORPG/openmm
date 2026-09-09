@@ -47,5 +47,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_SPARSE_FORCE_AGGREGATION` | One Q32.32 write per sparse-pair component | Bounded SIMD aggregation of adjacent equal-target, already-quantized contributions; floating mode unchanged |
 | `OPENMM_METAL_EXPERIMENTAL_MATRIX_SCREEN` | No experiment. | Isolated matrix-screening experiment. |
 | `OPENMM_METAL_EXPERIMENTAL_NONBONDED_HYBRID` | Preserve the selected baseline/shuffle tiled path | Native Metal fixed-lane gathers of read-only atom data, retaining threadgroup force accumulation |
+| `OPENMM_METAL_FAST_GBSA_BORN_FORCE_FLOAT` | Exchange the finalized 64-bit Born-force input in pair tiles | Convert explicitly declared read-only Born-force values to FP32 once at tile load; retain global Q32.32 accumulation and the original pairwise scaling order; any unannotated interaction keeps full-width payloads |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
