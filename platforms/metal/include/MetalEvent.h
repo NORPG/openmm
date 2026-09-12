@@ -40,10 +40,12 @@ namespace OpenMM {
 class MetalContext;
 
 /**
- * @brief Record a Metal queue position for host waits and cross-queue GPU dependencies.
+ * @brief Record a Metal 4 queue position for host waits and cross-queue GPU dependencies.
  *
  * Adapted from CudaEvent. Each enqueue() uses a fresh native event so recording
  * again does not alter GPU waits already submitted for an earlier recording.
+ * A tracked GPU marker makes completion observable even when a queue wait is
+ * immediately followed by flushQueue() without another kernel or transfer.
  * @warning The associated MetalContext must outlive this event. Host access must
  *          be serialized with recording and queue submission.
  */

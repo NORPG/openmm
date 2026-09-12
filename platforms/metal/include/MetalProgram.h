@@ -42,7 +42,7 @@ class MetalContext;
 /**
  * @brief Wraps a compiled Metal library through the Common program interface.
  *
- * MetalContext::compileProgram() creates this object from native Metal 3.0
+ * MetalContext::compileProgram() creates this object from native MSL 4.0
  * source. It does not translate existing Common kernel source into MSL.
  * The library is retained by this object; the context must outlive it and any
  * kernels created from it.
@@ -59,7 +59,7 @@ public:
     /** @brief Releases this program's retained library without destroying its kernels. */
     ~MetalProgram();
     /**
-     * @brief Creates an independently owned compute pipeline for a library entry point.
+     * @brief Creates an independently owned compute pipeline using the context's Metal 4 compiler.
      * @param name The host-visible name of the Metal kernel function.
      * @return A shared-ownership ComputeKernel handle with no arguments bound.
      *         It may outlive this program, but not the context.

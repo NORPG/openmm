@@ -38,18 +38,20 @@
 namespace OpenMM {
 
 /**
- * @brief Metal command queue with submission tracking and GPU error reporting.
+ * @brief Metal 4 queue with explicit ordering, resource lifetime, and error reporting.
  *
- * Adapted from CudaQueue. Native handles are kept opaque so callers can include
- * this header from ordinary C++ code.
- * @warning Host calls must be serialized by the caller; this wrapper has no lock.
+ * Adapted from the CUDA/HIP queue interface. Native types remain private so this
+ * header can be included from ordinary C++11 code.
+ * @warning Host encoding/submission calls must be serialized by the caller.
  */
 class MetalQueue : public ComputeQueueImpl {
 public:
+    /** @brief Opaque ownership handle for one Metal 4 submission, defined privately. */
+    struct Command;
     /**
-     * @brief Create and own a native command queue on the supplied device.
-     * @param device Borrowed, non-null native @c id<MTLDevice> handle.
-     * @throws OpenMMException If the device is null or queue creation fails.
+     * @brief Create a native Metal 4 queue and its marker buffer.
+     * @param device Borrowed, non-null native MTLDevice handle.
+     * @throws OpenMMException If the device is null or resource creation fails.
      */
     explicit MetalQueue(void* device);
     /**
@@ -57,38 +59,40 @@ public:
      * @note Destruction does not report GPU errors; use wait() or finish() explicitly.
      */
     ~MetalQueue();
-    /**
-     * @return A borrowed native @c id<MTLCommandQueue> handle; do not release it.
-     * @note Submit its command buffers through submit() so completion and errors are tracked.
-     */
+    /** @return A borrowed native MTL4CommandQueue handle; do not release it. */
     void* getQueue() const;
     /**
-     * @brief Retain and commit a command buffer without waiting for GPU execution.
-     * @param commandBuffer Borrowed native @c id<MTLCommandBuffer> from this queue,
-     *                      not yet committed.
-     * @throws OpenMMException If the buffer is null, foreign, or already committed,
-     *         or an earlier completed submission reports an error.
-     * @note Completed submissions are reaped first. If one reports an error, the
-     *       supplied command buffer is not committed by this call.
+     * @return A new, recording command with its own allocator and residency set.
+     * @throws OpenMMException If resource creation fails.
+     * @note The caller ends its encoder before passing this handle to submit().
      */
-    void submit(void* commandBuffer);
+    std::shared_ptr<Command> createCommand();
     /**
-     * @brief Wait for all currently tracked submissions and report execution errors.
+     * @return An unsubmitted one-byte GPU fill marker, ready for submit().
+     * @note A real GPU operation makes completion observable after queue-level event waits.
+     * @throws OpenMMException If command creation or encoding fails.
+     */
+    std::shared_ptr<Command> createMarker();
+    /**
+     * @brief End and commit a command, retaining its resources through completion.
+     * @param command A recording command created by this queue, with no open encoder.
+     * @throws OpenMMException If null, foreign, already submitted, or a reaped command failed.
+     * @note Does not wait for execution. Reaping an earlier error prevents this submission.
+     */
+    void submit(const std::shared_ptr<Command>& command);
+    /**
+     * @brief Wait for all currently tracked submissions, including event-wait markers.
      * @throws OpenMMException If GPU execution fails.
-     * @note An empty queue requires no wait. Other queues are not synchronized.
      */
     void finish();
     /**
-     * @brief Wait through a submitted marker, checking preceding tracked commands for errors.
-     * @param commandBuffer Borrowed native @c id<MTLCommandBuffer> already committed
-     *                      on this queue; it may already have completed or been reaped.
-     * @throws OpenMMException If the marker is null, uncommitted, or foreign, or GPU
-     *         execution fails. Tracked commands through the marker are drained before
-     *         their first execution error is reported.
-     * @note Later submissions are not waited for. Errors from already-reaped preceding
-     *       commands are not retained; the marker's own status is always checked.
+     * @brief Wait through a submitted marker and report preceding tracked execution errors.
+     * @param command A submitted command from this queue; it may already have been reaped.
+     * @throws OpenMMException If null, foreign, unsubmitted, or GPU execution failed.
+     * @note Drains through the marker before reporting the first error. Later work is not
+     *       waited for; previously reaped errors are not retained, except in the marker itself.
      */
-    void wait(void* commandBuffer);
+    void wait(const std::shared_ptr<Command>& command);
 private:
     class Impl;
     std::unique_ptr<Impl> impl;

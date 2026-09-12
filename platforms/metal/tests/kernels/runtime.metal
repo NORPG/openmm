@@ -30,6 +30,37 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#if __METAL_VERSION__ != 400
+#error These tests require the Metal 4.0 language target.
+#endif
+
+/**
+ * @brief Report the compiled MSL language version through a GPU write.
+ * @param output Buffer 0, with space for one uint containing __METAL_VERSION__.
+ * @param globalID Metal-provided thread position in the one-dimensional grid.
+ * @note Only the first thread writes, so complete threadgroups are safe.
+ */
+kernel void recordLanguageVersion(device uint* output [[buffer(0)]],
+        uint globalID [[thread_position_in_grid]]) {
+    if (globalID == 0)
+        output[0] = __METAL_VERSION__;
+}
+
+/**
+ * @brief Store a vector argument to test per-launch scalar snapshots and binding gaps.
+ * @param output Buffer 0, containing enough int4 elements for index.
+ * @param index Nonnegative destination element index at buffer 1.
+ * @param value Sixteen-byte vector at buffer 3; buffer slot 2 is unused.
+ * @param globalID Metal-provided thread position in the one-dimensional grid.
+ * @note Only the first thread writes. Each launch supplies a separate destination index.
+ */
+kernel void recordVectorArgument(device int4* output [[buffer(0)]],
+        constant int& index [[buffer(1)]], constant int4& value [[buffer(3)]],
+        uint globalID [[thread_position_in_grid]]) {
+    if (globalID == 0)
+        output[index] = value;
+}
+
 /**
  * @brief Apply an integer transform while exercising array and scalar bindings.
  * @param input Source array at buffer 0, containing at least count integers.

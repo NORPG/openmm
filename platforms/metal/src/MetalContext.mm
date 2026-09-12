@@ -33,8 +33,10 @@
 #include "MetalEvent.h"
 #include "MetalProgram.h"
 #include "MetalQueue.h"
+#include "MetalCommand.h"
 #include "openmm/internal/ThreadPool.h"
 #import <Metal/Metal.h>
+#include <dispatch/dispatch.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -46,6 +48,7 @@ using namespace std;
 
 struct MetalContext::Impl {
     id<MTLDevice> device = nil;
+    id<MTL4Compiler> compiler = nil;
     id<MTLBuffer> pinnedBuffer = nil;
     ThreadPool threads;
     Impl() : threads(1) {
@@ -59,8 +62,12 @@ MetalContext::MetalContext(const System& system) : ComputeContext(system), energ
             impl->device = MTLCreateSystemDefaultDevice();
             if (impl->device == nil)
                 throw OpenMMException("No Metal device is available");
-            if (![impl->device supportsFamily:MTLGPUFamilyApple7])
-                throw OpenMMException("The Metal Platform requires Apple silicon");
+            if (![impl->device supportsFamily:MTLGPUFamilyMetal4])
+                throw OpenMMException("The Metal Platform requires a Metal 4 capable Apple silicon GPU");
+            NSError* error = nil;
+            impl->compiler = [impl->device newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&error];
+            if (impl->compiler == nil)
+                throw OpenMMException("Error creating Metal 4 compiler");
             defaultQueue = createQueue();
             restoreDefaultQueue();
             numAtoms = system.getNumParticles();
@@ -123,6 +130,10 @@ void* MetalContext::getDevice() const {
     return (__bridge void*) impl->device;
 }
 
+void* MetalContext::getCompiler() const {
+    return (__bridge void*) impl->compiler;
+}
+
 ContextImpl* MetalContext::getContextImpl() {
     throw OpenMMException("The Metal Platform is not attached to a simulation Context");
 }
@@ -135,7 +146,7 @@ MetalQueue& MetalContext::getCurrentMetalQueue() {
     MetalQueue* queue = dynamic_cast<MetalQueue*>(currentQueue.get());
     if (queue == nullptr)
         throw OpenMMException("The current queue is not a MetalQueue");
-    id<MTLCommandQueue> native = (__bridge id<MTLCommandQueue>) queue->getQueue();
+    id<MTL4CommandQueue> native = (__bridge id<MTL4CommandQueue>) queue->getQueue();
     if (native.device != impl->device)
         throw OpenMMException("The current Metal queue belongs to a different device");
     return *queue;
@@ -164,11 +175,23 @@ ComputeProgram MetalContext::compileProgram(const string source, const map<strin
             code += "#define "+define.first+" "+define.second+"\n";
         code += source;
         MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
-        options.languageVersion = MTLLanguageVersion3_0;
-        options.fastMathEnabled = YES;
-        NSError* error = nil;
-        id<MTLLibrary> library = [impl->device newLibraryWithSource:[NSString stringWithUTF8String:code.c_str()]
-                options:options error:&error];
+        options.languageVersion = MTLLanguageVersion4_0;
+        options.mathMode = MTLMathModeFast;
+        options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsFast;
+        MTL4LibraryDescriptor* descriptor = [MTL4LibraryDescriptor new];
+        descriptor.source = [NSString stringWithUTF8String:code.c_str()];
+        descriptor.options = options;
+        // The synchronous Metal 4 API returns a dangling NSError with API validation
+        // on macOS 26.6.2. Retain callback results and wait to preserve Common semantics.
+        __block id<MTLLibrary> library = nil;
+        __block NSError* error = nil;
+        dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+        [impl->compiler newLibraryWithDescriptor:descriptor completionHandler:^(id<MTLLibrary> result, NSError* failure) {
+            library = result;
+            error = failure;
+            dispatch_semaphore_signal(ready);
+        }];
+        dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
         if (library == nil)
             throw OpenMMException("Error compiling Metal program: "+
                     (error == nil ? string("unknown error") : string(error.localizedDescription.UTF8String)));
@@ -197,15 +220,14 @@ void MetalContext::clearBuffer(ArrayInterface& array) {
         return;
     @autoreleasepool {
         MetalQueue& queue = getCurrentMetalQueue();
-        id<MTLCommandQueue> commandQueue = (__bridge id<MTLCommandQueue>) queue.getQueue();
-        id<MTLCommandBuffer> command = [commandQueue commandBuffer];
-        id<MTLBlitCommandEncoder> encoder = [command blitCommandEncoder];
-        if (encoder == nil)
-            throw OpenMMException("Error creating Metal clear command");
-        [encoder fillBuffer:(__bridge id<MTLBuffer>) metalArray.getBuffer()
+        auto command = queue.createCommand();
+        id<MTLBuffer> buffer = (__bridge id<MTLBuffer>) metalArray.getBuffer();
+        command->useBuffer(buffer);
+        id<MTL4ComputeCommandEncoder> encoder = command->beginCompute();
+        [encoder fillBuffer:buffer
                 range:NSMakeRange(0, metalArray.getSize()*metalArray.getElementSize()) value:0];
         [encoder endEncoding];
-        queue.submit((__bridge void*) command);
+        queue.submit(command);
     }
 }
 

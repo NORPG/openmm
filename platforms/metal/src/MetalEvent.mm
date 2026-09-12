@@ -32,6 +32,7 @@
 #include "MetalEvent.h"
 #include "MetalContext.h"
 #include "MetalQueue.h"
+#include "MetalCommand.h"
 #include "openmm/OpenMMException.h"
 #import <Metal/Metal.h>
 
@@ -40,7 +41,7 @@ using namespace OpenMM;
 class MetalEvent::Impl {
 public:
     id<MTLEvent> event;
-    id<MTLCommandBuffer> marker;
+    std::shared_ptr<MetalQueue::Command> marker;
     ComputeQueue queue;
 };
 
@@ -52,36 +53,34 @@ MetalEvent::~MetalEvent() {
 
 void MetalEvent::enqueue() {
     MetalQueue& queue = context.getCurrentMetalQueue();
-    id<MTLCommandQueue> commandQueue = (__bridge id<MTLCommandQueue>) queue.getQueue();
+    id<MTL4CommandQueue> commandQueue = (__bridge id<MTL4CommandQueue>) queue.getQueue();
     // Separate recordings must not signal each other when made on different queues.
     id<MTLEvent> event = [commandQueue.device newEvent];
-    id<MTLCommandBuffer> marker = [commandQueue commandBuffer];
-    if (event == nil || marker == nil)
+    if (event == nil)
         throw OpenMMException("Error recording Metal event");
-    [marker encodeSignalEvent:event value:1];
-    queue.submit((__bridge void*) marker);
+    auto marker = queue.createMarker();
+    marker->signalEvent = event;
+    queue.submit(marker);
     impl->event = event;
     impl->marker = marker;
     impl->queue = context.getCurrentQueue();
 }
 
 void MetalEvent::wait() {
-    if (impl->marker != nil)
-        static_cast<MetalQueue&>(*impl->queue).wait((__bridge void*) impl->marker);
+    if (impl->marker)
+        static_cast<MetalQueue&>(*impl->queue).wait(impl->marker);
 }
 
 void MetalEvent::queueWait(ComputeQueue queue) {
     MetalQueue* target = dynamic_cast<MetalQueue*>(queue.get());
     if (target == nullptr)
         throw OpenMMException("Metal event requires a Metal command queue");
-    id<MTLCommandQueue> commandQueue = (__bridge id<MTLCommandQueue>) target->getQueue();
+    id<MTL4CommandQueue> commandQueue = (__bridge id<MTL4CommandQueue>) target->getQueue();
     if (commandQueue.device != (__bridge id<MTLDevice>) context.getDevice())
         throw OpenMMException("Metal event and command queue belong to different devices");
-    if (impl->marker == nil)
+    if (!impl->marker)
         return;
-    id<MTLCommandBuffer> buffer = [commandQueue commandBuffer];
-    if (buffer == nil)
-        throw OpenMMException("Error creating Metal event wait command buffer");
-    [buffer encodeWaitForEvent:impl->event value:1];
-    target->submit((__bridge void*) buffer);
+    auto marker = target->createMarker();
+    marker->waitEvent = impl->event;
+    target->submit(marker);
 }

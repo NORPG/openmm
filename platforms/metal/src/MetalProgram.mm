@@ -50,12 +50,18 @@ MetalProgram::~MetalProgram() {
 
 ComputeKernel MetalProgram::createKernel(const string& name) {
     @autoreleasepool {
-        id<MTLFunction> function = [impl->library newFunctionWithName:[NSString stringWithUTF8String:name.c_str()]];
-        if (function == nil)
+        NSString* functionName = [NSString stringWithUTF8String:name.c_str()];
+        if (![impl->library.functionNames containsObject:functionName])
             throw OpenMMException("Unknown Metal kernel: "+name);
-        id<MTLDevice> device = (__bridge id<MTLDevice>) context.getDevice();
+        MTL4LibraryFunctionDescriptor* function = [MTL4LibraryFunctionDescriptor new];
+        function.library = impl->library;
+        function.name = functionName;
+        MTL4ComputePipelineDescriptor* descriptor = [MTL4ComputePipelineDescriptor new];
+        descriptor.computeFunctionDescriptor = function;
+        id<MTL4Compiler> compiler = (__bridge id<MTL4Compiler>) context.getCompiler();
         NSError* error = nil;
-        id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+        id<MTLComputePipelineState> pipeline = [compiler newComputePipelineStateWithDescriptor:descriptor
+                compilerTaskOptions:nil error:&error];
         if (pipeline == nil)
             throw OpenMMException("Error creating Metal pipeline "+name+": "+
                     (error == nil ? string("unknown error") : string(error.localizedDescription.UTF8String)));

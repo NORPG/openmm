@@ -43,9 +43,9 @@ class MetalArray;
 class MetalContext;
 
 /**
- * @brief Executes a Metal compute pipeline through the Common kernel interface.
+ * @brief Executes a Metal 4 compute pipeline through the Common kernel interface.
  *
- * Arguments use consecutive direct Metal buffer bindings starting at zero.
+ * Arguments use consecutive Metal 4 argument-table buffer bindings starting at zero.
  * Arrays and copied primitive values share the same 31 slots (indices 0-30). The
  * caller must match the native MSL signature, byte layouts, and resource-access
  * rules; this class does not inspect or translate the shader's argument ABI.
@@ -53,6 +53,8 @@ class MetalContext;
  * @note The context must outlive this kernel. Array arguments are non-owning
  *       references and must remain alive while bound; their current buffers are
  *       resolved at each launch so that resizing and rebinding are observed.
+ *       Each submission retains its native buffers and a snapshot of primitive
+ *       bytes until completion; later rebinding cannot change an in-flight launch.
  */
 class MetalKernel : public ComputeKernelImpl {
 public:

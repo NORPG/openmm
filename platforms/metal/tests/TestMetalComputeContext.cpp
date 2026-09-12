@@ -87,6 +87,18 @@ ComputeKernel createTransform(ComputeProgram program, ArrayInterface& input,
     return kernel;
 }
 
+void testLanguageVersion(ComputeContext& context, ComputeProgram program) {
+    ComputeArray output;
+    output.initialize<uint32_t>(context, 1, "languageVersion");
+    context.clearBuffer(output);
+    ComputeKernel kernel = program->createKernel("recordLanguageVersion");
+    kernel->addArg(output);
+    kernel->execute(1);
+    vector<uint32_t> result;
+    output.download(result);
+    ASSERT_EQUAL(uint32_t(400), result[0]);
+}
+
 void testContext(ComputeContext& context) {
     const size_t paddedAtoms = context.getPaddedNumAtoms();
     ASSERT_EQUAL(65, context.getNumAtoms());
@@ -142,6 +154,16 @@ void testArrays(ComputeContext& context) {
     expectException("pinned upload exceeds capacity", [&] { array.upload(pinned+pinnedBytes-sizeof(int), false); });
     expectException("pinned download exceeds capacity", [&] { array.download(pinned+pinnedBytes-sizeof(int), false); });
     expectException("pinned offset past end", [&] { array.download(pinned+pinnedBytes, false); });
+
+    // Exercise different nonzero offsets in the pinned source and destination array.
+    vector<int> subarrayExpected;
+    array.download(subarrayExpected);
+    memcpy(pinned+sizeof(int), replacement, sizeof(replacement));
+    array.uploadSubArray(pinned+sizeof(int), 4, 3, false);
+    context.flushQueue();
+    copy(replacement, replacement+3, subarrayExpected.begin()+4);
+    array.download(result);
+    ASSERT_EQUAL_CONTAINERS(subarrayExpected, result);
 
     // Use raw-pointer overloads: Common's vector helpers assume nonempty vectors.
     ComputeArray empty, emptyCopy;
@@ -203,6 +225,8 @@ void testArguments(ComputeContext& context, ComputeProgram program) {
     kernel->addArg();
     kernel->addArg();
     kernel->addArg();
+    // An empty launch does not require the pending argument slots to be bound.
+    kernel->execute(0);
     expectException("unbound kernel arguments", [&] { kernel->execute(1); });
     kernel->setArg(0, input);
     kernel->setArg(1, output);
@@ -232,7 +256,102 @@ void testArguments(ComputeContext& context, ComputeProgram program) {
     struct OversizedArgument { double values[5]; } oversized = {};
     expectException("oversized primitive argument", [&] { kernel->setArg(3, oversized); });
     expectException("zero block size", [&] { kernel->execute(129, 0); });
+    expectException("negative thread count", [&] { kernel->execute(-1); });
+    expectException("negative block size", [&] { kernel->execute(129, -2); });
     expectException("excessive block size", [&] { kernel->execute(129, kernel->getMaxBlockSize()+1); });
+    ComputeKernel tooManyArguments = program->createKernel("transform");
+    for (int i = 0; i < 32; i++)
+        tooManyArguments->addArg(0);
+    expectException("too many buffer arguments", [&] { tooManyArguments->execute(1); });
+}
+
+void testVectorArguments(ComputeContext& context, ComputeProgram program) {
+    const int launches = 16;
+    ASSERT_EQUAL(size_t(16), sizeof(mm_int4));
+    ComputeArray output;
+    output.initialize<mm_int4>(context, launches, "vectorArgumentOutput");
+    ComputeKernel kernel = program->createKernel("recordVectorArgument");
+    kernel->addArg(output);
+    kernel->addArg(0);
+    kernel->addArg(0); // The native shader leaves buffer slot 2 unused.
+    kernel->addArg(mm_int4(0, 0, 0, 0));
+    for (int i = 0; i < launches; i++) {
+        kernel->setArg(1, i);
+        kernel->setArg(3, mm_int4(i, -i, i+17, -i-9));
+        kernel->execute(1);
+    }
+    vector<mm_int4> result;
+    output.download(result);
+    for (int i = 0; i < launches; i++) {
+        ASSERT_EQUAL(i, result[i].x);
+        ASSERT_EQUAL(-i, result[i].y);
+        ASSERT_EQUAL(i+17, result[i].z);
+        ASSERT_EQUAL(-i-9, result[i].w);
+    }
+}
+
+void testInFlightArguments(ComputeContext& context) {
+    const int count = 129, launches = 32;
+    ComputeArray input;
+    input.initialize<int>(context, count, "inFlightInput");
+    vector<int> values = inputValues(count), result;
+    input.upload(values);
+    vector<unique_ptr<ComputeArray>> outputs;
+    for (int i = 0; i < launches; i++) {
+        outputs.emplace_back(new ComputeArray());
+        outputs.back()->initialize<int>(context, count, "inFlightOutput");
+    }
+    {
+        map<string, string> defines;
+        defines["VALUE_SCALE"] = "3";
+        ComputeProgram program = context.compileProgram(loadSource(), defines);
+        ComputeKernel kernel = createTransform(program, input, *outputs[0], count, 0);
+        // No per-launch waits: each submission must retain its own bindings and
+        // scalar bytes even as the next launch replaces the kernel's arguments.
+        for (int i = 0; i < launches; i++) {
+            kernel->setArg(1, *outputs[i]);
+            kernel->setArg(3, i-16);
+            kernel->execute(count);
+        }
+    }
+    // Submitted work must survive destruction of the kernel and its program.
+    for (int i = 0; i < launches; i++) {
+        outputs[i]->download(result);
+        checkTransform(values, result, i-16);
+    }
+}
+
+void testPendingResize(ComputeContext& context, ComputeProgram program) {
+    const int count = 129, resizedCount = 257;
+    ComputeArray input, output, copied;
+    input.initialize<int>(context, count, "pendingResizeInput");
+    output.initialize<int>(context, count, "pendingResizeOutput");
+    copied.initialize<int>(context, count, "pendingResizeCopy");
+    vector<int> values = inputValues(count), result(count);
+    input.upload(values);
+    ComputeKernel kernel = createTransform(program, input, output, count, 8);
+    kernel->execute(count);
+    output.copyTo(copied);
+    void* pinned = context.getPinnedBuffer();
+    output.download(pinned, false);
+    // Replace both allocations without waiting for commands that reference the
+    // old storage. The queued launch, copy, and readback must keep it alive.
+    input.resize(resizedCount);
+    output.resize(resizedCount);
+    context.flushQueue();
+    memcpy(result.data(), pinned, count*sizeof(int));
+    checkTransform(values, result, 8);
+    copied.download(result);
+    checkTransform(values, result, 8);
+
+    // The same bound array objects must resolve to their replacement storage.
+    values = inputValues(resizedCount);
+    input.upload(values);
+    kernel->setArg(2, resizedCount);
+    kernel->setArg(3, -11);
+    kernel->execute(resizedCount);
+    output.download(result);
+    checkTransform(values, result, -11);
 }
 
 void testClearing(MetalContext& metal) {
@@ -321,6 +440,62 @@ void testQueues(MetalContext& metal, ComputeProgram program) {
     metal.getCurrentMetalQueue().finish();
 }
 
+void testEventRecordings(ComputeContext& context, ComputeProgram program) {
+    ComputeQueue original = context.getCurrentQueue(), secondary = context.createQueue();
+    ComputeEvent event = context.createEvent();
+    event->wait();
+    event->queueWait(secondary);
+    ASSERT(context.getCurrentQueue() == original);
+    expectException("null event queue", [&] { event->queueWait(ComputeQueue()); });
+    ComputeQueue foreign(new ComputeQueueImpl());
+    expectException("non-Metal event queue", [&] { event->queueWait(foreign); });
+
+    const int count = 129;
+    ComputeArray input, first, second;
+    input.initialize<int>(context, count, "eventInput");
+    first.initialize<int>(context, count, "firstRecordingOutput");
+    second.initialize<int>(context, count, "secondRecordingOutput");
+    vector<int> values = inputValues(count), result(count);
+    input.upload(values);
+    int* pinned = static_cast<int*>(context.getPinnedBuffer());
+    ComputeKernel kernel = createTransform(program, input, first, count, 19);
+    kernel->execute(count);
+    first.download(pinned, false);
+    event->enqueue();
+    event->queueWait(secondary);
+
+    context.setCurrentQueue(secondary);
+    kernel->setArg(1, second);
+    kernel->setArg(3, -7);
+    kernel->execute(count);
+    second.download(pinned+count, false);
+    // Rerecord on another queue while the previous recording's GPU wait is
+    // already submitted. That wait must continue to refer to the first record.
+    event->enqueue();
+    context.setCurrentQueue(original);
+    event->wait();
+    // wait() follows the recorded source queue, not the currently selected one.
+    memcpy(result.data(), pinned, count*sizeof(int));
+    checkTransform(values, result, 19);
+    memcpy(result.data(), pinned+count, count*sizeof(int));
+    checkTransform(values, result, -7);
+
+    // Start fresh work without a source host wait. The target queue's dependency
+    // must survive destroying the event wrapper before that target is flushed.
+    context.setCurrentQueue(secondary);
+    kernel->setArg(3, 41);
+    kernel->execute(count);
+    second.download(pinned, false);
+    event = context.createEvent();
+    event->enqueue();
+    event->queueWait(original);
+    event.reset();
+    context.setCurrentQueue(original);
+    context.flushQueue();
+    memcpy(result.data(), pinned, count*sizeof(int));
+    checkTransform(values, result, 41);
+}
+
 void testErrors(ComputeContext& context, ComputeProgram program) {
     expectException("simulation context is unavailable", [&] { context.getContextImpl(); });
     expectException("integration utilities are unavailable", [&] { context.getIntegrationUtilities(); });
@@ -360,12 +535,17 @@ int main() {
         map<string, string> defines;
         defines["VALUE_SCALE"] = "3";
         ComputeProgram program = context.compileProgram(loadSource(), defines);
+        testLanguageVersion(context, program);
         testContext(context);
         testArrays(context);
         testLaunches(context, program);
         testArguments(context, program);
+        testVectorArguments(context, program);
+        testInFlightArguments(context);
+        testPendingResize(context, program);
         testClearing(*metal);
         testQueues(*metal, program);
+        testEventRecordings(context, program);
         testErrors(context, program);
         metal->getCurrentMetalQueue().finish();
     }

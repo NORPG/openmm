@@ -22,7 +22,7 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 # --------------------------------------------------------------------------
 
-# Metal Platform: minimal implementation of the Common compute interfaces.
+# Metal 4 Platform: minimal implementation of the Common compute interfaces.
 # This target does not yet register an OpenMM simulation Platform.
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -35,9 +35,9 @@ if(NOT OPENMM_BUILD_SHARED_LIB)
     message(FATAL_ERROR "The Metal Platform currently requires OPENMM_BUILD_SHARED_LIB=ON")
 endif()
 
-# Keep the minimum target local to Metal and preserve a newer user target.
-if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "13.0")
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0")
+# Keep the Metal 4 OS requirement local and preserve a newer user target.
+if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "26.0")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0")
 endif()
 enable_language(OBJCXX)
 

@@ -41,7 +41,7 @@ namespace OpenMM {
 class MetalQueue;
 
 /**
- * @brief Single-device, single-precision ComputeContext for the Metal Platform.
+ * @brief Single-device, single-precision ComputeContext using the Metal 4 host API.
  *
  * This runtime foundation follows CudaContext/HipContext. It provides arrays,
  * queues, events, and native MSL compilation, but is not yet registered as a
@@ -94,6 +94,8 @@ public:
     MetalQueue& getCurrentMetalQueue();
     /** @return A borrowed native @c id<MTLDevice> handle; do not release it. */
     void* getDevice() const;
+    /** @return A borrowed native MTL4Compiler handle; do not release it. */
+    void* getCompiler() const;
     /** @return A new, uninitialized MetalArray; the caller owns the returned object. */
     MetalArray* createArray() override;
     /**
@@ -116,7 +118,7 @@ public:
      */
     ComputeSort createSort(ComputeSortImpl::SortTrait* trait, unsigned int length, bool uniform=true) override;
     /**
-     * @brief Compile native MSL 3.0 source with fast math enabled.
+     * @brief Compile native MSL 4.0 source with fast math enabled through MTL4Compiler.
      * @param source Native Metal source, not untranslated Common Compute source.
      * @param defines Macro names and replacement text prepended as preprocessor definitions.
      * @return A shared owner of the compiled MetalProgram.

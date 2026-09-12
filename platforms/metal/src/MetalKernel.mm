@@ -32,6 +32,7 @@
 #include "MetalKernel.h"
 #include "MetalContext.h"
 #include "MetalQueue.h"
+#include "MetalCommand.h"
 #include "openmm/internal/AssertionUtilities.h"
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -70,24 +71,44 @@ void MetalKernel::execute(int threads, int blockSize) {
             throw OpenMMException("Unbound argument for Metal kernel "+name);
     @autoreleasepool {
         MetalQueue& queue = context.getCurrentMetalQueue();
-        id<MTLCommandQueue> commandQueue = (__bridge id<MTLCommandQueue>) queue.getQueue();
-        id<MTLCommandBuffer> command = [commandQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        if (encoder == nil)
-            throw OpenMMException("Error creating Metal kernel command");
+        auto command = queue.createCommand();
+        id<MTLDevice> device = (__bridge id<MTLDevice>) context.getDevice();
+        MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
+        descriptor.maxBufferBindCount = arrayArgs.size();
+        descriptor.initializeBindings = YES;
+        NSError* error = nil;
+        id<MTL4ArgumentTable> arguments = [device newArgumentTableWithDescriptor:descriptor error:&error];
+        if (arguments == nil)
+            throw OpenMMException("Error creating Metal 4 argument table for "+name);
+        [command->resources addObject:arguments];
+        [command->resources addObject:impl->pipeline];
+        id<MTLBuffer> constants = nil;
+        if (any_of(primitiveArgSizes.begin(), primitiveArgSizes.end(), [](int size) { return size != 0; })) {
+            // Metal 4 has no setBytes(). Snapshot each launch, using the existing 32-byte slots.
+            constants = [device newBufferWithBytes:primitiveArgs.data()
+                    length:primitiveArgs.size()*sizeof(mm_double4) options:MTLResourceStorageModeShared];
+            if (constants == nil)
+                throw OpenMMException("Error creating Metal 4 kernel argument storage for "+name);
+            command->useBuffer(constants);
+        }
+        id<MTL4ComputeCommandEncoder> encoder = command->beginCompute();
         [encoder setComputePipelineState:impl->pipeline];
         // Like CudaKernel, resolve arrays at each launch so resize/rebinding is visible.
         for (int i = 0; i < arrayArgs.size(); i++) {
-            if (arrayArgs[i] != nullptr)
-                [encoder setBuffer:(__bridge id<MTLBuffer>) arrayArgs[i]->getBuffer() offset:0 atIndex:i];
+            if (arrayArgs[i] != nullptr) {
+                id<MTLBuffer> buffer = (__bridge id<MTLBuffer>) arrayArgs[i]->getBuffer();
+                command->useBuffer(buffer);
+                [arguments setAddress:buffer.gpuAddress atIndex:i];
+            }
             else
-                [encoder setBytes:&primitiveArgs[i] length:primitiveArgSizes[i] atIndex:i];
+                [arguments setAddress:constants.gpuAddress+i*sizeof(mm_double4) atIndex:i];
         }
+        [encoder setArgumentTable:arguments];
         int gridSize = min(1+(threads-1)/blockSize, context.getNumThreadBlocks());
         [encoder dispatchThreadgroups:MTLSizeMake(gridSize, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(blockSize, 1, 1)];
         [encoder endEncoding];
-        queue.submit((__bridge void*) command);
+        queue.submit(command);
     }
 }
 
