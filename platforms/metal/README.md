@@ -50,5 +50,6 @@ Record-and-commit is forced ON even when an existing caller cache requests OFF.
 | `OPENMM_METAL_FAST_GBSA_BORN_FORCE_FLOAT` | Exchange the finalized 64-bit Born-force input in pair tiles | Convert explicitly declared read-only Born-force values to FP32 once at tile load; retain global Q32.32 accumulation and the original pairwise scaling order; any unannotated interaction keeps full-width payloads |
 | `OPENMM_METAL_FAST_GBSA_RECIPROCAL_REUSE` | Unchanged Common GBSA reciprocal expressions | Reuse chain-rule denominators on the normal fixed-point path; floating accumulators and explicitly requested safe math retain the original logarithms; independently validate changed rounding |
 | `OPENMM_METAL_NATIVE_FLOAT_ATOMICS` | OpenCL-style float-add CAS loop | Native Metal float atomic add, independently of accumulator representation |
+| `OPENMM_METAL_FAST_PME_FLOAT_SPREAD` | Fixed-point PME grid | Common floating-grid PME spreading, without the conversion dispatch |
 
 Benchmark metadata and the BenchmarkMetal target are not available at this stage.
