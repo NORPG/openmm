@@ -1,3 +1,4 @@
+// OPENMM_METAL_SOURCE_POLICY PRECISE_MATH
 #define WARP_SIZE 32
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
